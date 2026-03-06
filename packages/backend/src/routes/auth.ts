@@ -72,6 +72,29 @@ router.post('/google', async (req: Request, res: Response): Promise<void> => {
          VALUES ($1, 'google', $2, $3)`,
         [userId, googleSub, emailHash]
       );
+
+      // 3-1) 신규 사용자 bootstrap: 모든 카드에 대한 초기 card_state 생성
+      const bootstrapResult = await client.query(
+        `INSERT INTO card_state (
+           user_id, card_id, due_ts, interval_days, ease_factor, repetitions, stability, state
+         )
+         SELECT
+           $1,
+           c.card_id,
+           NOW(),
+           0,
+           2.5,
+           0,
+           0,
+           'new'
+         FROM cards c
+         ON CONFLICT (user_id, card_id) DO NOTHING`,
+        [userId]
+      );
+
+      if ((bootstrapResult.rowCount ?? 0) === 0) {
+        throw new Error('초기 학습 카드가 준비되지 않았습니다. seed 데이터 상태를 확인하세요.');
+      }
     }
 
     // 4) 앱 JWT 발급
@@ -91,6 +114,7 @@ router.post('/google', async (req: Request, res: Response): Promise<void> => {
       expiresAt: expiresAt.toISOString(),
       userId,
       isNewUser,
+      readyForStudy: true,
     });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -240,6 +264,11 @@ router.delete('/me', requireAuth, async (req: Request, res: Response): Promise<v
  * 반환된 appToken을 Keychain에 저장하면 requireAuth 미들웨어를 통과한다.
  */
 router.post('/dev-init', async (req: Request, res: Response): Promise<void> => {
+  if (process.env.NODE_ENV === 'production') {
+    res.status(404).json({ error: '찾을 수 없는 엔드포인트입니다.' });
+    return;
+  }
+
   const { userId, device = 'WEB' } = req.body as { userId?: string; device?: string };
   if (!userId) {
     res.status(400).json({ error: 'userId 필요' });

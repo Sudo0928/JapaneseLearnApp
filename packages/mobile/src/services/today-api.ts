@@ -5,6 +5,7 @@
  */
 
 import { ReviewEvent } from '@japanese-learn/shared';
+import type { PlanResponse, PlanUiPolicy } from '@japanese-learn/shared';
 import { getValidAppToken } from './secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
@@ -31,6 +32,8 @@ export interface TodayResponse {
   newCards: CardWithItem[];
   confusionDrills: (CardWithItem & { isDrill?: boolean })[];   // P1-3
   totalCount: number;
+  plan: PlanResponse;
+  uiPolicy: PlanUiPolicy;
 }
 
 async function authHeaders(): Promise<Record<string, string>> {

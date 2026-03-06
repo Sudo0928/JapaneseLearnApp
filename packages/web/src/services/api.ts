@@ -12,6 +12,7 @@ import type {
   MeResponse,
   TodayResponse,
   WeeklyReport,
+  ExperimentAssignment,
   AssignmentsResponse,
   AaValidationResponse,
   PlanResponse,
@@ -94,7 +95,7 @@ export async function fetchWeeklyReport(): Promise<WeeklyReport> {
 
 // ─── 실험 현황 ───────────────────────────────────────────────
 
-export type { AssignmentsResponse, AaValidationResponse };
+export type { ExperimentAssignment, AssignmentsResponse, AaValidationResponse };
 
 export async function fetchExperiments(): Promise<AssignmentsResponse> {
   return request<AssignmentsResponse>('/experiments/assignments');

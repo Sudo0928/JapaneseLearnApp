@@ -101,6 +101,32 @@ export async function requireAuth(
 }
 
 /**
+ * 운영용 관리자 보호 미들웨어
+ * - 개발 환경에서는 호출을 허용한다.
+ * - 프로덕션에서는 x-admin-key 헤더가 ADMIN_API_KEY 와 일치해야 한다.
+ */
+export function requireAdminKey(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  if (process.env.NODE_ENV !== 'production') {
+    next();
+    return;
+  }
+
+  const expected = process.env.ADMIN_API_KEY;
+  const provided = req.header('x-admin-key');
+
+  if (!expected || !provided || provided !== expected) {
+    res.status(403).json({ error: '관리자 권한이 필요합니다.' });
+    return;
+  }
+
+  next();
+}
+
+/**
  * Google ID Token 검증 (POST /v1/auth/google 에서 사용)
  */
 export async function verifyGoogleIdToken(idToken: string): Promise<{

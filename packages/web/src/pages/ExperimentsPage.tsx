@@ -4,7 +4,11 @@ import styles from '../styles';
 
 export default function ExperimentsPage() {
   const [assignments, setAssignments] = useState<ExperimentAssignment[]>([]);
-  const [aaBalance, setAaBalance] = useState<{ control_count: number; treatment_count: number; balance_ok: boolean } | null>(null);
+  const [aaBalance, setAaBalance] = useState<{
+    control_count: number;
+    treatment_count: number;
+    is_balanced: boolean;
+  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -41,9 +45,9 @@ export default function ExperimentsPage() {
             <div style={styles.kpiCard}>
               <div style={{
                 ...styles.kpiValue,
-                color: aaBalance.balance_ok ? '#059669' : '#ef4444',
+                color: aaBalance.is_balanced ? '#059669' : '#ef4444',
               }}>
-                {aaBalance.balance_ok ? '균형 OK' : '불균형 주의'}
+                {aaBalance.is_balanced ? '균형 OK' : '불균형 주의'}
               </div>
               <div style={styles.kpiLabel}>상태</div>
             </div>
@@ -80,7 +84,9 @@ export default function ExperimentsPage() {
                       {a.variant}
                     </span>
                   </td>
-                  <td style={styles.td}>{new Date(a.assigned_at).toLocaleString('ko-KR')}</td>
+                  <td style={styles.td}>
+                    {a.assigned_at ? new Date(a.assigned_at).toLocaleString('ko-KR') : '-'}
+                  </td>
                 </tr>
               ))}
             </tbody>

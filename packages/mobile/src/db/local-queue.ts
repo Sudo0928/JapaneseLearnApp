@@ -9,6 +9,7 @@
  */
 
 import { Platform } from 'react-native';
+import * as ExpoSQLite from 'expo-sqlite';
 import { ReviewEvent, validateReviewEventBasic } from '@japanese-learn/shared';
 
 const MAX_RETRY = 5;
@@ -29,13 +30,11 @@ const _webQueue = new Map<string, QueueRow>();
 const IS_WEB = Platform.OS === 'web';
 
 // 네이티브 전용 — 웹에서는 import 자체를 건너뜀
-let SQLite: typeof import('expo-sqlite') | null = null;
 let _db: import('expo-sqlite').SQLiteDatabase | null = null;
 
 async function getNativeDb() {
-  if (!SQLite) SQLite = await import('expo-sqlite');
   if (_db) return _db;
-  _db = await SQLite.openDatabaseAsync('japanese_learn_queue.db');
+  _db = await ExpoSQLite.openDatabaseAsync('japanese_learn_queue.db');
   await _db.execAsync(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS event_queue (
@@ -58,7 +57,7 @@ async function getNativeDb() {
  */
 export async function enqueueEvent(event: ReviewEvent): Promise<void> {
   if (!validateReviewEventBasic(event)) {
-    throw new Error(`ReviewEvent 검증 실패: event_id=${event.event_id}`);
+    throw new Error('ReviewEvent 검증 실패');
   }
   if (IS_WEB) {
     if (!_webQueue.has(event.event_id)) {

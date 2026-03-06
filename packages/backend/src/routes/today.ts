@@ -15,6 +15,8 @@ import { validateReviewEvent } from '../services/event-validator';
 import { requireAuth } from '../middleware/auth';
 import { getConfusionDrillCards } from '../services/confusion-drill-service';
 import { ReviewEvent } from '@japanese-learn/shared';
+import { generatePlan } from '../services/plan-generator';
+import { selectCardsByMix } from '../services/queue-compiler';
 
 const router = Router();
 
@@ -29,17 +31,44 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
 
   const maxReview = parseInt((req.query.maxReview as string) ?? '40', 10);
   const maxNew = parseInt((req.query.maxNew as string) ?? '6', 10);
+  const dailyMinutes = parseInt((req.query.dailyMinutes as string) ?? '20', 10);
 
-  if (maxReview < 0 || maxReview > 200 || maxNew < 0 || maxNew > 50) {
-    res.status(400).json({ error: 'maxReview(0~200), maxNew(0~50) 범위를 확인하세요.' });
+  if (maxReview < 0 || maxReview > 200 || maxNew < 0 || maxNew > 50 || dailyMinutes < 5 || dailyMinutes > 120) {
+    res.status(400).json({ error: 'maxReview(0~200), maxNew(0~50), dailyMinutes(5~120) 범위를 확인하세요.' });
     return;
   }
 
   try {
-    const [{ reviewCards, newCards }, confusionDrills] = await Promise.all([
-      getTodayCards(userId, maxReview, maxNew),
-      getConfusionDrillCards(userId, 3),   // P1-3: 세션당 최대 3개 혼동 드릴
+    const plan = await generatePlan({
+      user_id: userId,
+      date: new Date().toISOString().slice(0, 10),
+      goal: {},
+      constraints: {
+        daily_minutes: dailyMinutes,
+        max_new: maxNew,
+        offline_expected: false,
+      },
+    });
+
+    const reviewCandidateLimit = Math.min(200, Math.max(maxReview, plan.daily_budget.review_count * 3));
+    const newCandidateLimit = Math.min(50, Math.max(maxNew, plan.daily_budget.new_count * 3));
+
+    const [{ reviewCards: rawReviewCards, newCards: rawNewCards }, confusionDrills] = await Promise.all([
+      getTodayCards(userId, reviewCandidateLimit, newCandidateLimit),
+      getConfusionDrillCards(userId, Math.min(3, plan.daily_budget.error_drill_count)),
     ]);
+
+    const reviewCards = selectCardsByMix(
+      rawReviewCards,
+      plan.mix,
+      Math.min(maxReview, plan.daily_budget.review_count)
+    );
+
+    const newCards = selectCardsByMix(
+      rawNewCards,
+      plan.mix,
+      Math.min(maxNew, plan.daily_budget.new_count)
+    );
 
     res.json({
       date: new Date().toISOString().slice(0, 10),
@@ -47,7 +76,9 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
       reviewCards,
       newCards,
       confusionDrills,
-      totalCount: reviewCards.length + newCards.length,
+      totalCount: reviewCards.length + newCards.length + confusionDrills.length,
+      plan,
+      uiPolicy: plan.ui_policy,
     });
   } catch (err) {
     console.error('[today] 조회 오류:', err);

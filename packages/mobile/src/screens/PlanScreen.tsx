@@ -13,6 +13,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { getValidAppToken } from '../services/secure-storage';
+import type { PlanResponse } from '@japanese-learn/shared';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
@@ -37,6 +38,7 @@ interface PlanScreenProps {
 
 export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenProps) {
   const [diagResult, setDiagResult] = useState<DiagResult | null>(null);
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [loading, setLoading]       = useState(true);
 
   const load = useCallback(async () => {
@@ -46,12 +48,31 @@ export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenPro
       if (!token) { setLoading(false); return; }
 
       const res = await fetch(
-        `${BACKEND_URL}/v1/diagnosis/result?userId=${encodeURIComponent(userId)}`,
+        `${BACKEND_URL}/v1/diagnosis/result`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
       if (res.ok) {
         const data = await res.json() as DiagResult;
         setDiagResult(data);
+
+        const planRes = await fetch(`${BACKEND_URL}/v1/plan/generate`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            constraints: { daily_minutes: data.strategy_vector.load_sensitive >= 0.6 ? 10 : 20, max_new: 10 },
+            analysis_result: { strategy_vector: data.strategy_vector },
+          }),
+        });
+
+        if (planRes.ok) {
+          const planData = await planRes.json() as PlanResponse;
+          setPlan(planData);
+        } else {
+          setPlan(null);
+        }
       }
     } catch {
       // 오프라인
@@ -94,8 +115,8 @@ export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenPro
     { key: 'load_sensitive', label: '인지 부하 민감도', desc: '작업기억 용량과 복잡도 내성',       icon: '⚡' },
   ];
 
-  const insights = buildInsights(sv, diagResult.weakness_flags ?? []);
-  const plan     = buildPlan(sv);
+  const insights = plan?.notes?.length ? plan.notes : buildInsights(sv, diagResult.weakness_flags ?? []);
+  const planItems = plan ? buildPlanFromServer(plan) : buildPlan(sv);
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -159,7 +180,7 @@ export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenPro
       {/* 오늘의 학습 플랜 */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>📅 오늘의 학습 플랜</Text>
-        {plan.map((item, i) => (
+        {planItems.map((item, i) => (
           <View key={i} style={styles.planRow}>
             <Text style={styles.planBullet}>{item.icon}</Text>
             <View>
@@ -169,6 +190,15 @@ export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenPro
           </View>
         ))}
       </View>
+
+      {plan?.experiment_variant && (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>🧪 현재 적용 실험</Text>
+          <Text style={styles.insightText}>
+            현재 플랜은 `{plan.experiment_variant}` 변형을 기반으로 계산되었습니다.
+          </Text>
+        </View>
+      )}
 
       <TouchableOpacity onPress={onRestartDiagnosis} style={styles.reDiagBtn}>
         <Text style={styles.reDiagText}>🔄 진단 다시 받기</Text>
@@ -230,6 +260,33 @@ function buildPlan(sv: StrategyVector): { icon: string; label: string; value: st
     { icon: '🔘', label: '선택형(MCQ) 비율', value: `${mcq_pct}%` },
     { icon: '📖', label: '읽기 특화 비율', value: `+${reading_pct}%p` },
     { icon: '💡', label: '힌트 단계', value: sv.load_sensitive >= 0.6 ? '2단계' : '1단계' },
+  ];
+}
+
+function buildPlanFromServer(plan: PlanResponse): { icon: string; label: string; value: string }[] {
+  return [
+    { icon: '📌', label: '신규 카드/일', value: `${plan.daily_budget.new_count}장` },
+    { icon: '🔁', label: '복습 카드/일', value: `${plan.daily_budget.review_count}장` },
+    {
+      icon: '📖',
+      label: '읽기 문항 비율',
+      value: `${Math.round((plan.mix.SURFACE_TO_READING ?? 0) * 100)}%`,
+    },
+    {
+      icon: '🔘',
+      label: '선택형(MCQ) 비율',
+      value: `${Math.round((plan.mix.MCQ ?? 0) * 100)}%`,
+    },
+    {
+      icon: '💡',
+      label: '힌트 단계',
+      value: `${plan.ui_policy.hint_steps}단계`,
+    },
+    {
+      icon: '⏱',
+      label: '세션 단위',
+      value: `${plan.ui_policy.session_chunk_min}분`,
+    },
   ];
 }
 

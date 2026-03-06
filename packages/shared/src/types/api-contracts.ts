@@ -52,6 +52,8 @@ export interface TodayResponse {
   newCards: TodayCard[];
   confusionDrills: TodayCard[];   // P1-3: 혼동쌍 처방 카드
   totalCount: number;
+  plan: PlanResponse;
+  uiPolicy: PlanUiPolicy;
 }
 
 // ─── 플랜 ────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ export interface PlanMix {
   SURFACE_TO_READING: number;
   MCQ: number;
   CLOZE: number;
+  LISTENING: number;
 }
 
 export interface PlanDailyBudget {
@@ -75,6 +78,7 @@ export interface PlanUiPolicy {
   hint_steps: number;
   show_example_by_default: boolean;
   mini_handwriting: boolean;
+  session_chunk_min: number;
 }
 
 export interface PlanResponse {
@@ -107,6 +111,41 @@ export interface DelayedRecallEstimate {
   recall_rate: number;
 }
 
+export interface RetentionBucketMetric {
+  window_days: number;
+  eligible_count: number;
+  correct_count: number;
+  recall_rate: number;
+  avg_lateness_days: number;
+}
+
+export interface RetentionMetrics {
+  due_7d: RetentionBucketMetric;
+  due_14d: RetentionBucketMetric;
+  due_30d: RetentionBucketMetric;
+  overdue_adjusted_recall_rate: number;
+  total_eligible_reviews: number;
+}
+
+export interface ConfusionMetric {
+  surface: string;
+  error_type: string;
+  error_count: number;
+}
+
+export interface ConfusionMetrics {
+  top_confusions: ConfusionMetric[];
+  total_confusion_errors: number;
+  dominant_error_type: string | null;
+}
+
+export interface RecoveryMetrics {
+  overdue_backlog_days: number;
+  recovery_completion_rate: number;
+  recovery_time_to_normal_days: number | null;
+  post_recovery_retention: number | null;
+}
+
 export interface WeeklyReport {
   user_id: string;
   period: { from: string; to: string };
@@ -119,8 +158,9 @@ export interface WeeklyReport {
     streak_days: number;
   };
   daily_stats: DailyStats[];
-  delayed_recall: DelayedRecallEstimate;
-  top_confusions: { surface: string; error_type: string; error_count: number }[];
+  retention_metrics: RetentionMetrics;
+  confusion_metrics: ConfusionMetrics;
+  recovery_metrics: RecoveryMetrics;
   insights: string[];
   generated_at: string;
 }

@@ -10,9 +10,9 @@
 
 import { Router, Request, Response } from 'express';
 import { pool } from '../db/pool';
-import { validateReviewEventBatch, validateReviewEvent } from '../services/event-validator';
+import { validateReviewEventBatch } from '../services/event-validator';
 import { requireAuth } from '../middleware/auth';
-import { replayEventsToCardState } from '../services/card-state-service';
+import { applyReviewResultWithStatus } from '../services/card-state-service';
 import { ReviewEvent } from '@japanese-learn/shared';
 
 const router = Router();
@@ -62,55 +62,21 @@ router.post('/', requireAuth, async (req: Request, res: Response): Promise<void>
     return;
   }
 
-  const client = await pool.connect();
   try {
     const insertedIds: string[] = [];
     const duplicateIds: string[] = [];
+    const sortedAccepted = [...(accepted as ReviewEvent[])].sort(
+      (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime()
+    );
 
-    await client.query('BEGIN');
-
-    for (const event of accepted as ReviewEvent[]) {
-      const result = await client.query<{ event_id: string }>(
-        `
-        INSERT INTO review_log (
-          event_id, user_id, card_id, item_id, ts,
-          prompt_type, correct, rt_ms, attempt_count, hint_level,
-          confidence, error_type, device, offline, schema_version
-        ) VALUES (
-          $1, $2, $3, $4, $5::TIMESTAMPTZ,
-          $6, $7, $8, $9, $10,
-          $11, $12, $13, $14, $15
-        )
-        ON CONFLICT (event_id) DO NOTHING
-        RETURNING event_id
-        `,
-        [
-          event.event_id,
-          event.user_id,
-          event.card_id,
-          event.item_id ?? null,
-          event.ts,
-          event.prompt_type,
-          event.correct,
-          event.rt_ms,
-          event.attempt_count ?? 1,
-          event.hint_level ?? 0,
-          event.confidence ?? null,
-          event.error_type ?? 'NONE',
-          event.device ?? 'UNKNOWN',
-          event.offline ?? false,
-          event.schema_version ?? '1.0.0',
-        ]
-      );
-
-      if (result.rows.length > 0) {
+    for (const event of sortedAccepted) {
+      const result = await applyReviewResultWithStatus(event);
+      if (result.inserted) {
         insertedIds.push(event.event_id);
       } else {
         duplicateIds.push(event.event_id);
       }
     }
-
-    await client.query('COMMIT');
 
     const hasRejected = rejected.length > 0;
     const statusCode =
@@ -128,22 +94,9 @@ router.post('/', requireAuth, async (req: Request, res: Response): Promise<void>
       duplicateEventIds: duplicateIds,
       ...(hasRejected ? { rejectedEvents: rejected } : {}),
     });
-
-    // P0-4: 새로 삽입된 이벤트를 card_state에 비동기 재적용 (베스트에포트)
-    if (insertedIds.length > 0) {
-      const insertedEvents = (accepted as ReviewEvent[]).filter((e) =>
-        insertedIds.includes(e.event_id)
-      );
-      replayEventsToCardState(insertedEvents).catch((err) => {
-        console.error('[events] card_state 재적용 오류 (비치명):', err);
-      });
-    }
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('[events] DB 오류:', err);
     res.status(500).json({ error: '이벤트 저장 중 서버 오류가 발생했습니다.' });
-  } finally {
-    client.release();
   }
 });
 

@@ -23,23 +23,36 @@ export default function ReportPage() {
   if (error)   return <div style={styles.errorBox}>{error}</div>;
   if (!report) return null;
 
+  const avgCorrectRate = report.summary.avg_correct_rate;
+  const delayedRecallRate = report.retention_metrics.due_7d.recall_rate;
+  const overdueRate = report.daily_stats.length > 0
+    ? report.summary.overdue_days / report.daily_stats.length
+    : 0;
+
   const kpiData = [
-    { name: '정답률',       value: report.correct_rate,       color: '#6366f1' },
-    { name: '지연 인출률',  value: report.delayed_recall_rate, color: '#059669' },
-    { name: '연체율',       value: report.overdue_rate,        color: '#ef4444' },
+    { name: '정답률',       value: avgCorrectRate,     color: '#6366f1' },
+    { name: '지연 인출률',  value: delayedRecallRate,  color: '#059669' },
+    { name: '연체율',       value: overdueRate,        color: '#ef4444' },
   ];
 
   return (
     <div style={styles.page}>
       <h2 style={styles.heading}>주간 리포트</h2>
-      <p style={styles.subtext}>{report.week_start} ~ {report.week_end}</p>
+      <p style={styles.subtext}>{report.period.from} ~ {report.period.to}</p>
 
       {/* KPI 카드 */}
       <div style={styles.kpiRow}>
-        <KpiCard label="총 리뷰"      value={`${report.total_reviews}건`} />
-        <KpiCard label="스트릭"        value={`${report.streak_days}일`} color="#f59e0b" />
-        <KpiCard label="지연 인출률"  value={pct(report.delayed_recall_rate)} color="#059669" />
-        <KpiCard label="연체율"        value={pct(report.overdue_rate)} color="#ef4444" />
+        <KpiCard label="총 리뷰"      value={`${report.summary.total_reviews}건`} />
+        <KpiCard label="스트릭"        value={`${report.summary.streak_days}일`} color="#f59e0b" />
+        <KpiCard label="지연 인출률"  value={pct(delayedRecallRate)} color="#059669" />
+        <KpiCard label="연체율"        value={pct(overdueRate)} color="#ef4444" />
+      </div>
+
+      <div style={styles.kpiRow}>
+        <KpiCard label="14일 유지" value={pct(report.retention_metrics.due_14d.recall_rate)} color="#0ea5e9" />
+        <KpiCard label="30일 유지" value={pct(report.retention_metrics.due_30d.recall_rate)} color="#8b5cf6" />
+        <KpiCard label="연체 보정" value={pct(report.retention_metrics.overdue_adjusted_recall_rate)} color="#f97316" />
+        <KpiCard label="회복 완료율" value={pct(report.recovery_metrics.recovery_completion_rate)} color="#22c55e" />
       </div>
 
       {/* 바 차트 */}
@@ -71,29 +84,42 @@ export default function ReportPage() {
       )}
 
       {/* 혼동쌍 */}
-      {report.top_confusion_pairs.length > 0 && (
+      {report.confusion_metrics.top_confusions.length > 0 && (
         <div style={styles.confusionBox}>
-          <h3 style={styles.sectionTitle}>자주 혼동하는 단어 Top 5</h3>
+          <h3 style={styles.sectionTitle}>자주 흔들리는 항목 Top 5</h3>
           <table style={styles.table}>
             <thead>
               <tr>
-                <th style={styles.th}>단어 A</th>
-                <th style={styles.th}>단어 B</th>
-                <th style={styles.th}>혼동 횟수</th>
+                <th style={styles.th}>표기</th>
+                <th style={styles.th}>오류 유형</th>
+                <th style={styles.th}>오류 횟수</th>
               </tr>
             </thead>
             <tbody>
-              {report.top_confusion_pairs.map((p, i) => (
+              {report.confusion_metrics.top_confusions.map((p, i) => (
                 <tr key={i} style={i % 2 === 0 ? styles.trEven : styles.trOdd}>
-                  <td style={styles.td}>{p.item_a}</td>
-                  <td style={styles.td}>{p.item_b}</td>
-                  <td style={{ ...styles.td, textAlign: 'center' }}>{p.count}</td>
+                  <td style={styles.td}>{p.surface}</td>
+                  <td style={styles.td}>{p.error_type}</td>
+                  <td style={{ ...styles.td, textAlign: 'center' }}>{p.error_count}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+
+      <div style={styles.insightBox}>
+        <h3 style={styles.sectionTitle}>회복 지표</h3>
+        <ul style={styles.insightList}>
+          <li style={styles.insightItem}>평균 연체 백로그: {report.recovery_metrics.overdue_backlog_days.toFixed(1)}일</li>
+          <li style={styles.insightItem}>정상화까지 소요: {report.recovery_metrics.recovery_time_to_normal_days ?? '-'}일</li>
+          <li style={styles.insightItem}>
+            회복 후 유지율: {report.recovery_metrics.post_recovery_retention !== null
+              ? pct(report.recovery_metrics.post_recovery_retention)
+              : '데이터 부족'}
+          </li>
+        </ul>
+      </div>
     </div>
   );
 }

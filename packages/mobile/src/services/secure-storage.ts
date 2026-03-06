@@ -35,7 +35,7 @@ export const STORAGE_KEYS = {
   DIAGNOSIS_DONE: 'jla_diag_done',    // 진단 완료 여부 ('1' = 완료)
 } as const;
 
-type StorageKey = typeof STORAGE_KEYS[keyof typeof STORAGE_KEYS];
+type StorageKey = string;
 
 /**
  * 문자열 값을 보안 저장소에 저장
@@ -110,4 +110,25 @@ export async function clearAuthData(): Promise<void> {
     secureDelete(STORAGE_KEYS.APP_TOKEN_EXPIRES),
     secureDelete(STORAGE_KEYS.USER_ID),
   ]);
+}
+
+/**
+ * 사용자별 진단 완료 키
+ * 같은 디바이스에서 계정이 바뀌어도 진단 상태가 섞이지 않도록 user_id를 포함한다.
+ */
+export function getDiagnosisDoneKey(userId: string): string {
+  return `${STORAGE_KEYS.DIAGNOSIS_DONE}:${userId}`;
+}
+
+export async function getDiagnosisDone(userId: string): Promise<boolean> {
+  const value = await secureGet(getDiagnosisDoneKey(userId));
+  return value === '1';
+}
+
+export async function setDiagnosisDone(userId: string, done: boolean): Promise<void> {
+  await secureSet(getDiagnosisDoneKey(userId), done ? '1' : '0');
+}
+
+export async function clearDiagnosisDone(userId: string): Promise<void> {
+  await secureDelete(getDiagnosisDoneKey(userId));
 }

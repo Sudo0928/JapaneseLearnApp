@@ -55,6 +55,10 @@ export default function SessionScreen({ userId, onSessionEnd }: SessionScreenPro
   const [hintLevel, setHintLevel] = useState(0);
   const [feedback, setFeedback] = useState<FeedbackData | null>(null);
   const [attemptCount, setAttemptCount] = useState(1);
+  const [maxHintSteps, setMaxHintSteps] = useState(2);
+  const [sessionChunkMin, setSessionChunkMin] = useState(20);
+  const [miniHandwriting, setMiniHandwriting] = useState(false);
+  const [planNotes, setPlanNotes] = useState<string[]>([]);
 
   // 반응시간 측정 (카드 표시 시점 기록)
   const cardShownAt = useRef<number>(Date.now());
@@ -67,6 +71,10 @@ export default function SessionScreen({ userId, onSessionEnd }: SessionScreenPro
     setPhase('loading');
     try {
       const data = await fetchTodayCards(userId);
+      setMaxHintSteps(Math.max(0, Math.min(3, data.uiPolicy?.hint_steps ?? 2)));
+      setSessionChunkMin(data.uiPolicy?.session_chunk_min ?? 20);
+      setMiniHandwriting(Boolean(data.uiPolicy?.mini_handwriting));
+      setPlanNotes(data.plan?.notes ?? []);
       // P1-3: 혼동 드릴은 복습 카드 사이에 균등 배분 (첫 카드부터 너무 몰리지 않도록)
       const regular = [...data.reviewCards, ...data.newCards];
       const drills  = (data.confusionDrills ?? []).map((c) => ({ ...c, isDrill: true }));
@@ -84,11 +92,14 @@ export default function SessionScreen({ userId, onSessionEnd }: SessionScreenPro
       // 남은 드릴 후미에 추가
       while (drillIdx < drills.length) combined.push(drills[drillIdx++]);
 
-      if (combined.length === 0) {
+      const chunkCardLimit = sessionCardLimit(data.uiPolicy?.session_chunk_min ?? 20);
+      const chunked = combined.slice(0, chunkCardLimit);
+
+      if (chunked.length === 0) {
         setPhase('complete');
         return;
       }
-      setQueue(combined);
+      setQueue(chunked);
       setCurrentIndex(0);
       setPhase('prompt');
       cardShownAt.current = Date.now();
@@ -294,6 +305,20 @@ export default function SessionScreen({ userId, onSessionEnd }: SessionScreenPro
             <View style={[styles.progressFill, { width: `${((currentIndex + 1) / queue.length) * 100}%` }]} />
           </View>
 
+          {(planNotes.length > 0 || sessionChunkMin <= 5 || miniHandwriting) && (
+            <View style={styles.policyBox}>
+              {planNotes.slice(0, 2).map((note, idx) => (
+                <Text key={`${idx}-${note}`} style={styles.policyText}>{note}</Text>
+              ))}
+              {sessionChunkMin <= 5 && (
+                <Text style={styles.policyText}>집중도 보호를 위해 짧은 세션 모드가 적용되었습니다.</Text>
+              )}
+              {miniHandwriting && (
+                <Text style={styles.policyText}>형태 회상 강화를 위해 표기 입력을 더 엄격하게 연습합니다.</Text>
+              )}
+            </View>
+          )}
+
           {/* 카드 표시 영역 */}
           <View style={[styles.card, (currentCard as any).isDrill && styles.drillCard]}>
             <Text style={[styles.stateLabel, (currentCard as any).isDrill && styles.drillLabel]}>
@@ -370,17 +395,17 @@ export default function SessionScreen({ userId, onSessionEnd }: SessionScreenPro
               >
                 <Text style={styles.btnText}>제출</Text>
               </TouchableOpacity>
-              {hintLevel < 2 && (
+              {hintLevel < maxHintSteps && (
                 <TouchableOpacity
                   style={styles.hintBtn}
                   onPress={handleHint}
                   accessible
                   accessibilityRole="button"
-                  accessibilityLabel={`힌트 보기, ${hintLevel + 1}단계 중 ${hintLevel + 1}단계`}
+                  accessibilityLabel={`힌트 보기, ${hintLevel + 1}단계 중 ${maxHintSteps}단계`}
                   hitSlop={{ top: 8, bottom: 8, left: 16, right: 16 }}
                 >
                   <Text style={styles.hintBtnText}>
-                    힌트 보기 ({hintLevel + 1}/2)
+                    힌트 보기 ({hintLevel + 1}/{maxHintSteps})
                   </Text>
                 </TouchableOpacity>
               )}
@@ -403,6 +428,18 @@ const styles = StyleSheet.create({
   },
   progressFill: {
     height: 4, backgroundColor: '#4A6CF7', borderRadius: 2,
+  },
+  policyBox: {
+    backgroundColor: '#EEF2FF',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 20,
+    gap: 6,
+  },
+  policyText: {
+    color: '#374151',
+    fontSize: 12,
+    lineHeight: 18,
   },
   card: {
     backgroundColor: '#fff',
@@ -472,3 +509,9 @@ const styles = StyleSheet.create({
   completeTitle: { fontSize: 24, fontWeight: 'bold', color: '#1A1A2E', marginBottom: 8 },
   completeSubtitle: { fontSize: 15, color: '#666', textAlign: 'center', marginBottom: 32, lineHeight: 22 },
 });
+
+function sessionCardLimit(sessionChunkMin: number): number {
+  if (sessionChunkMin <= 5) return 5;
+  if (sessionChunkMin <= 10) return 8;
+  return 999;
+}

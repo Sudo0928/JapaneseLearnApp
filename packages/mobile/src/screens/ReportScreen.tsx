@@ -19,36 +19,9 @@ import {
   RefreshControl,
 } from 'react-native';
 import { getValidAppToken } from '../services/secure-storage';
+import type { WeeklyReport } from '@japanese-learn/shared';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
-
-interface DailyStats {
-  day: string;
-  reviews: number;
-  correct_rate: number;
-  p50_rt_ms: number;
-}
-
-interface WeeklyReport {
-  period: { from: string; to: string };
-  summary: {
-    total_reviews: number;
-    total_new_cards: number;
-    avg_correct_rate: number;
-    avg_rt_ms: number;
-    overdue_days: number;
-    streak_days: number;
-  };
-  daily_stats: DailyStats[];
-  delayed_recall: {
-    items_7d_ago: number;
-    recalled_today: number;
-    recall_rate: number;
-  };
-  top_confusions: { surface: string; error_type: string; error_count: number }[];
-  insights: string[];
-  generated_at: string;
-}
 
 export default function ReportScreen({ userId }: { userId?: string }) {
   const [report, setReport]     = useState<WeeklyReport | null>(null);
@@ -126,7 +99,7 @@ export default function ReportScreen({ userId }: { userId?: string }) {
     );
   }
 
-  const { summary, delayed_recall, top_confusions, insights, daily_stats, period } = report;
+  const { summary, retention_metrics, confusion_metrics, recovery_metrics, insights, daily_stats, period } = report;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -152,18 +125,25 @@ export default function ReportScreen({ userId }: { userId?: string }) {
         </View>
 
         {/* 지연 인출 OEC — 즉시 정답률 대신 강조 */}
-        {delayed_recall.items_7d_ago >= 3 && (
+        {retention_metrics.due_7d.eligible_count >= 1 && (
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>7일 지연 인출률</Text>
             <Text style={styles.bigNumber}>
-              {Math.round(delayed_recall.recall_rate * 100)}%
+              {Math.round(retention_metrics.due_7d.recall_rate * 100)}%
             </Text>
             <Text style={styles.subText}>
-              7일 전 항목 {delayed_recall.items_7d_ago}개 중{' '}
-              {delayed_recall.recalled_today}개 기억
+              대상 {retention_metrics.due_7d.eligible_count}회 중{' '}
+              {retention_metrics.due_7d.correct_count}회 정확 회상
             </Text>
           </View>
         )}
+
+        <View style={styles.statsGrid}>
+          <StatCard label="14일 지연" value={`${Math.round(retention_metrics.due_14d.recall_rate * 100)}`} unit="%" />
+          <StatCard label="30일 지연" value={`${Math.round(retention_metrics.due_30d.recall_rate * 100)}`} unit="%" />
+          <StatCard label="연체 보정" value={`${Math.round(retention_metrics.overdue_adjusted_recall_rate * 100)}`} unit="%" />
+          <StatCard label="회복 완료율" value={`${Math.round(recovery_metrics.recovery_completion_rate * 100)}`} unit="%" />
+        </View>
 
         {/* 요약 통계 */}
         <View style={styles.statsGrid}>
@@ -183,10 +163,10 @@ export default function ReportScreen({ userId }: { userId?: string }) {
         )}
 
         {/* 혼동쌍 top-5 */}
-        {top_confusions.length > 0 && (
+        {confusion_metrics.top_confusions.length > 0 && (
           <View style={styles.card}>
             <Text style={styles.sectionTitle}>자주 틀린 항목</Text>
-            {top_confusions.map((c, i) => (
+            {confusion_metrics.top_confusions.map((c, i) => (
               <View key={i} style={styles.confusionRow}>
                 <Text style={styles.confusionRank}>{i + 1}</Text>
                 <Text style={styles.confusionSurface}>{c.surface}</Text>
@@ -196,6 +176,21 @@ export default function ReportScreen({ userId }: { userId?: string }) {
             ))}
           </View>
         )}
+
+        <View style={styles.card}>
+          <Text style={styles.sectionTitle}>회복 지표</Text>
+          <Text style={styles.insightText}>
+            평균 연체 백로그: {recovery_metrics.overdue_backlog_days.toFixed(1)}일
+          </Text>
+          <Text style={styles.insightText}>
+            정상화까지 소요: {recovery_metrics.recovery_time_to_normal_days ?? '-'}일
+          </Text>
+          <Text style={styles.insightText}>
+            회복 후 유지율: {recovery_metrics.post_recovery_retention !== null
+              ? `${Math.round(recovery_metrics.post_recovery_retention * 100)}%`
+              : '데이터 부족'}
+          </Text>
+        </View>
 
         {/* 일별 학습 바 차트 (간단 텍스트 기반) */}
         <View style={styles.card}>

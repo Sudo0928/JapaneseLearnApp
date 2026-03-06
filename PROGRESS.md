@@ -305,6 +305,132 @@
 
 - **다음 작업**: **P1** — API 계약 단일화(shared contract), 실험 variant→플랜 연결, 혼동쌍→세션 처방 전환
 
+### 2026-03-06 세션 10 — Stage 0 제품 잠금(지침서 기준) 1차 완료
+
+**근거 문서**: `docs/next-development-guideline.md` → 단계 0, `docs/mvp-execution-file.md` → Sprint A
+
+- **0-1 `/today/review` 완전 idempotency 보강** (`packages/backend/src/services/card-state-service.ts`)
+  - `review_log` 삽입 성공 시에만 `card_state` 갱신하도록 순서 변경
+  - 중복 `event_id` 재전송 시 현재 `card_state`를 반환하고 스케줄 이중 전진 방지
+  - `/v1/events`도 동일 서비스 경로를 사용하도록 정리
+
+- **0-2 신규 사용자 bootstrap 연결** (`packages/backend/src/routes/auth.ts`)
+  - `POST /v1/auth/google` 신규 가입 시 `card_state` 초기화 자동 수행
+  - 카드 seed가 비어 있으면 의미 있는 서버 오류를 반환하도록 보호
+  - 로그인 응답에 `readyForStudy: true` 추가
+
+- **0-3 `dev-init` 운영 차단** (`packages/backend/src/routes/auth.ts`)
+  - `NODE_ENV=production`에서 `/v1/auth/dev-init` 404 처리
+
+- **0-4 이벤트 시점 상태 스냅샷 저장** (`packages/backend/migrations/010_review_log_snapshot.sql`, `packages/backend/src/services/card-state-service.ts`)
+  - `review_log`에 `due_ts_at_review`, `interval_days_at_review`, `ease_factor_at_review`, `repetitions_at_review`, `state_at_review`, `is_new_at_review` 컬럼 추가
+  - 이후 분석/리포트가 현재 `card_state` 대신 event-time snapshot을 참조하도록 변경
+
+- **0-5 관리자/배치 엔드포인트 보호** (`packages/backend/src/middleware/auth.ts`, `packages/backend/src/routes/report.ts`, `packages/backend/src/routes/experiments.ts`)
+  - `requireAdminKey` 미들웨어 추가
+  - 프로덕션에서는 `x-admin-key == ADMIN_API_KEY`일 때만 `/v1/report/batch`, `/v1/experiments/aa-validate` 허용
+
+- **0-6 사용자별 진단 상태 분리** (`packages/mobile/src/services/secure-storage.ts`, `packages/mobile/App.tsx`)
+  - `jla_diag_done:${userId}` 키로 진단 상태 저장
+  - 같은 디바이스에서 계정이 바뀌어도 진단 완료 상태가 섞이지 않도록 수정
+
+- **검증**
+  - `npm run build --workspace=packages/backend` ✅
+  - `npm test --workspace=packages/backend` ✅
+  - `packages/mobile` `npx tsc --noEmit` ✅
+  - `ReadLints` 기준 신규 린트 오류 없음 ✅
+
+- **추가 정리**
+  - 모바일 기존 타입체크 이슈였던 `local-queue.ts`, `notification-service.ts`도 함께 정리해 현재 타입체크 통과
+
+- **수동 후속 확인 필요**
+  - `packages/backend/migrations/010_review_log_snapshot.sql` 실제 DB 적용
+  - 신규 사용자 로그인 → 진단 → 첫 세션 진입 E2E 확인
+  - production 환경에서 `ADMIN_API_KEY` 설정 검증
+
+### 2026-03-06 세션 11 — Stage 1 개인화 실행 연결 1차 완료
+
+**근거 문서**: `docs/next-development-guideline.md` → 단계 1, `docs/mvp-execution-file.md` → Sprint B
+
+- **1-1 플랜 API → 실제 플랜 화면 연결** (`packages/mobile/src/screens/PlanScreen.tsx`)
+  - 더 이상 로컬 휴리스틱만으로 플랜을 만들지 않고, 진단 결과 조회 후 `/v1/plan/generate`를 호출해 서버 플랜을 렌더링
+  - 서버 `daily_budget`, `mix`, `ui_policy`, `notes`, `experiment_variant`를 화면에 직접 반영
+
+- **1-2 플랜 기반 `today` 큐 컴파일러 연결** (`packages/backend/src/services/queue-compiler.ts`, `packages/backend/src/routes/today.ts`)
+  - `generatePlan()` 결과를 기반으로 `today` 응답 전 카드 후보를 prompt mix 기준으로 선택
+  - `daily_budget.review_count`, `daily_budget.new_count`, `error_drill_count`를 실제 세션 카드 수에 반영
+  - `/v1/today` 응답에 `plan`, `uiPolicy`를 함께 포함
+
+- **1-3 `ui_policy` → 실제 세션 UI 반영** (`packages/mobile/src/screens/SessionScreen.tsx`, `packages/mobile/src/services/today-api.ts`)
+  - 힌트 버튼 상한을 `hint_steps`로 제어
+  - `session_chunk_min`에 따라 짧은 세션 모드일 때 세션 카드 수를 자동 제한
+  - `mini_handwriting`, 플랜 노트를 정책 안내 박스로 노출
+
+- **1-4 shared 계약 정합 보강** (`packages/shared/src/types/api-contracts.ts`)
+  - `TodayResponse`에 `plan`, `uiPolicy` 추가
+  - `PlanMix`에 `LISTENING`, `PlanUiPolicy`에 `session_chunk_min` 반영
+
+- **1-5 웹 계약 오류 정리** (`packages/web/src/services/api.ts`, `packages/web/src/pages/ReportPage.tsx`, `packages/web/src/pages/ExperimentsPage.tsx`)
+  - shared 타입 기준으로 `WeeklyReport`, `AaValidationResponse`, `ExperimentAssignment` 참조 수정
+  - 웹 프로덕션 빌드 통과 확인
+
+- **1-6 자동화 테스트 추가** (`packages/backend/src/__tests__/queue-compiler.test.ts`)
+  - 플랜 mix가 실제 카드 선택 우선순위에 영향을 주는지 검증
+
+- **검증**
+  - `npm run build --workspace=packages/backend` ✅
+  - `npm test --workspace=packages/backend` ✅ (신규 `queue-compiler.test.ts` 포함 총 43개 통과)
+  - `npm run build --workspace=packages/shared` ✅
+  - `packages/mobile` `npx tsc --noEmit` ✅
+  - `npm run build --workspace=packages/web` ✅
+  - `ReadLints` 기준 신규 린트 오류 없음 ✅
+
+- **남은 Stage 1 후속**
+  - `MCQ`, `CLOZE`, `LISTENING` 실제 세션 렌더러 확장
+  - 오류 유형별 혼동 드릴 2차 고도화
+  - 실제 E2E에서 플랜 화면의 mix와 세션 카드 분포가 일치하는지 수동 검증
+
+### 2026-03-06 세션 12 — Stage 2 측정 체계 고도화 1차 완료
+
+**근거 문서**: `docs/next-development-guideline.md` → 단계 2, `docs/mvp-execution-file.md` → Sprint C
+
+- **2-1 true OEC 초안 구현** (`packages/backend/src/services/report-service.ts`)
+  - `7d_due_recall_rate`, `14d_due_recall_rate`, `30d_due_recall_rate`를 `interval_days_at_review`와 `due_ts_at_review` 기반으로 계산
+  - 단순 “7일 전 카드 재등장” 방식이 아니라, 실제 due-based review outcome 중심으로 retention bucket을 산출
+  - `overdue_adjusted_recall_rate` 추가 — 연체가 길수록 가중치를 낮춰 과대평가 방지
+
+- **2-2 리포트 계약 재설계** (`packages/shared/src/types/api-contracts.ts`, `packages/backend/src/services/report-service.ts`)
+  - `WeeklyReport`를 `summary`, `daily_stats`, `retention_metrics`, `confusion_metrics`, `recovery_metrics`, `insights` 구조로 재정의
+  - `confusion_metrics.top_confusions`, `dominant_error_type`, `total_confusion_errors` 포함
+  - `recovery_metrics.overdue_backlog_days`, `recovery_completion_rate`, `recovery_time_to_normal_days`, `post_recovery_retention` 포함
+
+- **2-3 모바일 리포트 화면 반영** (`packages/mobile/src/screens/ReportScreen.tsx`)
+  - shared `WeeklyReport` 타입 사용으로 계약 단일화
+  - `retention_metrics` 기준 7일/14일/30일/연체보정/회복완료율을 표시
+  - `recovery_metrics`를 별도 카드로 표시
+
+- **2-4 웹 리포트 화면 반영** (`packages/web/src/pages/ReportPage.tsx`)
+  - `retention_metrics`, `confusion_metrics`, `recovery_metrics`를 shared 계약 기준으로 렌더링
+  - 기존 proxy 필드(`delayed_recall_rate`, `overdue_rate` 등) 의존 제거
+
+- **2-5 테스트 추가** (`packages/backend/src/__tests__/report-metrics.test.ts`)
+  - due-based retention bucket 계산
+  - 7/14/30일 bucket 분기
+  - overdue adjusted recall 계산 검증
+
+- **검증**
+  - `npm run build --workspace=packages/backend` ✅
+  - `npm test --workspace=packages/backend` ✅ (총 46개 테스트 통과)
+  - `npm run build --workspace=packages/shared` ✅
+  - `packages/mobile` `npx tsc --noEmit` ✅
+  - `npm run build --workspace=packages/web` ✅
+  - `ReadLints` 기준 신규 린트 오류 없음 ✅
+
+- **남은 Stage 2 후속**
+  - `MVP-C3` 실험 운영 로그(`experiment_exposures`, `policy_applied`, `queue_shape`, `ui_policy_snapshot`) 구조화
+  - `MVP-C4` 회복 지표 정의 정교화 및 운영 기준 확정
+  - 실제 DB 데이터 기준으로 `true OEC`의 bucket 경계와 해석값 캘리브레이션
+
 ### 2026-03-05 세션 6 — Sprint 6 전체 완료 (MVP 완성)
 - **완료 항목**:
   - `src/services/sync-service.ts`: 지수 백오프 재시도(최대 5회, 30초 상한), 자동재시도(NetInfo 연동), SyncStatus 이미터, 배치 분할 처리

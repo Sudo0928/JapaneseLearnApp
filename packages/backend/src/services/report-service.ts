@@ -22,11 +22,39 @@ export interface DailyStats {
   lateness_p50_sec: number;
 }
 
-export interface DelayedRecallEstimate {
-  // 7일 전 학습 항목 중 오늘도 정답을 맞힌 비율 (지연 인출 근사치)
-  items_7d_ago: number;
-  recalled_today: number;
+export interface RetentionBucketMetric {
+  window_days: number;
+  eligible_count: number;
+  correct_count: number;
   recall_rate: number;
+  avg_lateness_days: number;
+}
+
+export interface RetentionMetrics {
+  due_7d: RetentionBucketMetric;
+  due_14d: RetentionBucketMetric;
+  due_30d: RetentionBucketMetric;
+  overdue_adjusted_recall_rate: number;
+  total_eligible_reviews: number;
+}
+
+export interface ConfusionMetric {
+  surface: string;
+  error_type: string;
+  error_count: number;
+}
+
+export interface ConfusionMetrics {
+  top_confusions: ConfusionMetric[];
+  total_confusion_errors: number;
+  dominant_error_type: string | null;
+}
+
+export interface RecoveryMetrics {
+  overdue_backlog_days: number;
+  recovery_completion_rate: number;
+  recovery_time_to_normal_days: number | null;
+  post_recovery_retention: number | null;
 }
 
 export interface WeeklyReport {
@@ -41,8 +69,9 @@ export interface WeeklyReport {
     streak_days: number;        // 연속 학습일
   };
   daily_stats: DailyStats[];
-  delayed_recall: DelayedRecallEstimate;
-  top_confusions: { surface: string; error_type: string; error_count: number }[];
+  retention_metrics: RetentionMetrics;
+  confusion_metrics: ConfusionMetrics;
+  recovery_metrics: RecoveryMetrics;
   insights: string[];           // 설명 가능한 3~5문장 인사이트
   generated_at: string;
 }
@@ -66,17 +95,16 @@ export async function upsertDailyAgg(userId: string, day: Date): Promise<void> {
       rl.user_id,
       $2::DATE AS day,
       COUNT(*) AS reviews,
-      COUNT(*) FILTER (WHERE cs.repetitions = 0) AS new_cards,
+      COUNT(*) FILTER (WHERE COALESCE(rl.is_new_at_review, FALSE)) AS new_cards,
       ROUND(AVG(CASE WHEN rl.correct THEN 1.0 ELSE 0.0 END)::NUMERIC, 3) AS correct_rate,
       COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY rl.rt_ms)::INTEGER, 0) AS p50_rt_ms,
       COALESCE(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY rl.rt_ms)::INTEGER, 0) AS p90_rt_ms,
       COALESCE(
         PERCENTILE_CONT(0.5) WITHIN GROUP (
-          ORDER BY EXTRACT(EPOCH FROM (rl.ts - cs.due_ts))
+          ORDER BY EXTRACT(EPOCH FROM (rl.ts - rl.due_ts_at_review))
         ), 0
       ) AS lateness_p50_sec
     FROM review_log rl
-    LEFT JOIN card_state cs ON cs.user_id = rl.user_id AND cs.card_id = rl.card_id
     WHERE rl.user_id = $1
       AND rl.ts::DATE = $2::DATE
     GROUP BY rl.user_id
@@ -152,9 +180,10 @@ export async function generateWeeklyReport(userId: string): Promise<WeeklyReport
   const overdueDays = dailyRows.filter((r) => Number(r.lateness_p50_sec) > 0).length;
   const streakDays = computeStreak(dailyRows);
 
-  // ─── 3) 지연 인출 추정 ───────────────────────────────────
-  // 7일 전에 복습한 카드 중 오늘도 정답을 맞힌 비율
-  const delayedRecall = await estimateDelayedRecall(userId);
+  // ─── 3) retention / recovery metric ─────────────────────
+  const retentionRows = await getRetentionObservations(userId, fromStr, toStr);
+  const retentionMetrics = buildRetentionMetrics(retentionRows);
+  const recoveryMetrics = buildRecoveryMetrics(retentionRows, dailyRows, retentionMetrics);
 
   // ─── 4) 혼동쌍 top-5 ─────────────────────────────────────
   const confusions = await getCachedConfusionPairs(userId, 7);
@@ -163,14 +192,20 @@ export async function generateWeeklyReport(userId: string): Promise<WeeklyReport
     error_type: c.error_type,
     error_count: c.error_count,
   }));
+  const confusionMetrics: ConfusionMetrics = {
+    top_confusions: topConfusions,
+    total_confusion_errors: confusions.reduce((sum, item) => sum + item.error_count, 0),
+    dominant_error_type: topConfusions[0]?.error_type ?? null,
+  };
 
   // ─── 5) 인사이트 생성 (설명 가능한 3~5문장) ─────────────
   const insights = buildInsights({
     activeDays: activeDays.length,
     avgCorrect,
-    delayedRecall,
+    retentionMetrics,
     overdueDays,
-    topConfusions,
+    confusionMetrics,
+    recoveryMetrics,
     streakDays,
   });
 
@@ -186,51 +221,129 @@ export async function generateWeeklyReport(userId: string): Promise<WeeklyReport
       streak_days: streakDays,
     },
     daily_stats: dailyRows,
-    delayed_recall: delayedRecall,
-    top_confusions: topConfusions,
+    retention_metrics: retentionMetrics,
+    confusion_metrics: confusionMetrics,
+    recovery_metrics: recoveryMetrics,
     insights,
     generated_at: new Date().toISOString(),
   };
 }
 
-// ─── 지연 인출 추정 ───────────────────────────────────────────
+// ─── retention / recovery metric ───────────────────────────────
 
-async function estimateDelayedRecall(userId: string): Promise<DelayedRecallEstimate> {
-  // 7~10일 전에 처음 복습했던 카드 중 최근 3일 내에도 정답을 맞힌 카드 비율
-  const { rows } = await pool.query<{
-    items_7d_ago: string;
-    recalled_today: string;
-  }>(
+interface RetentionObservation {
+  correct: boolean;
+  ts: string;
+  due_ts_at_review: string | null;
+  interval_days_at_review: number | null;
+}
+
+async function getRetentionObservations(
+  userId: string,
+  from: string,
+  to: string
+): Promise<RetentionObservation[]> {
+  const { rows } = await pool.query<RetentionObservation>(
     `
-    WITH cards_7d_ago AS (
-      SELECT DISTINCT card_id
-      FROM review_log
-      WHERE user_id = $1
-        AND ts BETWEEN NOW() - INTERVAL '10 days' AND NOW() - INTERVAL '7 days'
-        AND correct = true
-    ),
-    recalled AS (
-      SELECT DISTINCT rl.card_id
-      FROM review_log rl
-      JOIN cards_7d_ago c ON c.card_id = rl.card_id
-      WHERE rl.user_id = $1
-        AND rl.ts >= NOW() - INTERVAL '3 days'
-        AND rl.correct = true
-    )
     SELECT
-      (SELECT COUNT(*) FROM cards_7d_ago) AS items_7d_ago,
-      (SELECT COUNT(*) FROM recalled) AS recalled_today
+      correct,
+      ts::TEXT,
+      due_ts_at_review::TEXT,
+      interval_days_at_review
+    FROM review_log
+    WHERE user_id = $1
+      AND ts::DATE BETWEEN $2::DATE AND $3::DATE
+      AND due_ts_at_review IS NOT NULL
+      AND interval_days_at_review IS NOT NULL
+    ORDER BY ts ASC
     `,
-    [userId]
+    [userId, from, to]
   );
 
-  const items = Number(rows[0]?.items_7d_ago ?? 0);
-  const recalled = Number(rows[0]?.recalled_today ?? 0);
+  return rows;
+}
+
+export function buildRetentionMetrics(rows: RetentionObservation[]): RetentionMetrics {
+  const eligible = rows.filter((row) => isDueBasedReview(row));
 
   return {
-    items_7d_ago: items,
-    recalled_today: recalled,
-    recall_rate: items > 0 ? round2(recalled / items) : 0,
+    due_7d: computeRetentionBucketMetric(eligible, 7, 5, 9),
+    due_14d: computeRetentionBucketMetric(eligible, 14, 10, 18),
+    due_30d: computeRetentionBucketMetric(eligible, 30, 21, 45),
+    overdue_adjusted_recall_rate: computeOverdueAdjustedRecallRate(eligible),
+    total_eligible_reviews: eligible.length,
+  };
+}
+
+export function computeRetentionBucketMetric(
+  rows: RetentionObservation[],
+  windowDays: number,
+  minIntervalDays: number,
+  maxIntervalDays: number
+): RetentionBucketMetric {
+  const bucket = rows.filter((row) => {
+    const interval = row.interval_days_at_review ?? 0;
+    return interval >= minIntervalDays && interval <= maxIntervalDays;
+  });
+
+  const correctCount = bucket.filter((row) => row.correct).length;
+  const avgLateness = bucket.length > 0
+    ? bucket.reduce((sum, row) => sum + latenessDays(row), 0) / bucket.length
+    : 0;
+
+  return {
+    window_days: windowDays,
+    eligible_count: bucket.length,
+    correct_count: correctCount,
+    recall_rate: bucket.length > 0 ? round2(correctCount / bucket.length) : 0,
+    avg_lateness_days: round2(avgLateness),
+  };
+}
+
+export function computeOverdueAdjustedRecallRate(rows: RetentionObservation[]): number {
+  if (rows.length === 0) return 0;
+
+  // 연체가 길수록 가중치를 낮춰 "늦게 맞힌 정답"의 과대평가를 줄인다.
+  const totals = rows.reduce(
+    (acc, row) => {
+      const weight = 1 / (1 + Math.max(0, latenessDays(row)));
+      acc.weightedTotal += weight;
+      acc.weightedCorrect += row.correct ? weight : 0;
+      return acc;
+    },
+    { weightedCorrect: 0, weightedTotal: 0 }
+  );
+
+  return totals.weightedTotal > 0 ? round2(totals.weightedCorrect / totals.weightedTotal) : 0;
+}
+
+export function buildRecoveryMetrics(
+  rows: RetentionObservation[],
+  dailyRows: DailyStats[],
+  retentionMetrics: RetentionMetrics
+): RecoveryMetrics {
+  const eligible = rows.filter((row) => isDueBasedReview(row));
+  const overdueRows = eligible.filter((row) => latenessDays(row) > 1);
+  const onTimeRows = eligible.filter((row) => latenessDays(row) <= 1);
+
+  const overdueBacklogDays = overdueRows.length > 0
+    ? round2(overdueRows.reduce((sum, row) => sum + latenessDays(row), 0) / overdueRows.length)
+    : 0;
+
+  const recoveryCompletionRate = eligible.length > 0
+    ? round2(onTimeRows.length / eligible.length)
+    : 0;
+
+  const recoveryTimeToNormalDays = estimateRecoveryTimeToNormalDays(dailyRows);
+  const postRecoveryRetention = recoveryTimeToNormalDays !== null
+    ? retentionMetrics.due_7d.recall_rate
+    : null;
+
+  return {
+    overdue_backlog_days: overdueBacklogDays,
+    recovery_completion_rate: recoveryCompletionRate,
+    recovery_time_to_normal_days: recoveryTimeToNormalDays,
+    post_recovery_retention: postRecoveryRetention,
   };
 }
 
@@ -239,9 +352,10 @@ async function estimateDelayedRecall(userId: string): Promise<DelayedRecallEstim
 function buildInsights(data: {
   activeDays: number;
   avgCorrect: number;
-  delayedRecall: DelayedRecallEstimate;
+  retentionMetrics: RetentionMetrics;
   overdueDays: number;
-  topConfusions: { surface: string; error_type: string }[];
+  confusionMetrics: ConfusionMetrics;
+  recoveryMetrics: RecoveryMetrics;
   streakDays: number;
 }): string[] {
   const insights: string[] = [];
@@ -253,27 +367,32 @@ function buildInsights(data: {
 
   insights.push(`이번 주 ${data.activeDays}일 학습하셨습니다.`);
 
-  // 지연 인출 중심 OEC
-  if (data.delayedRecall.items_7d_ago >= 5) {
-    const pct = Math.round(data.delayedRecall.recall_rate * 100);
+  // true OEC 중심 인사이트
+  if (data.retentionMetrics.due_7d.eligible_count >= 3) {
+    const pct = Math.round(data.retentionMetrics.due_7d.recall_rate * 100);
     if (pct >= 75) {
-      insights.push(`7일 전 학습 항목의 ${pct}%를 오늘도 정확히 기억했습니다. 장기 기억이 잘 형성되고 있습니다.`);
+      insights.push(`7일 목표 간격 복습의 ${pct}%를 정확히 회상했습니다. 장기 기억 유지가 안정적입니다.`);
     } else if (pct >= 50) {
-      insights.push(`7일 전 학습 항목의 ${pct}%를 오늘 기억했습니다. 복습 빈도를 높이면 유지율이 올라갑니다.`);
+      insights.push(`7일 목표 간격 복습의 ${pct}%를 회상했습니다. 간격 유지와 추가 복습의 균형을 조정할 필요가 있습니다.`);
     } else {
-      insights.push(`7일 전 학습 항목의 ${pct}%만 기억했습니다. 오늘 복습을 집중적으로 진행하는 것을 권장합니다.`);
+      insights.push(`7일 목표 간격 복습의 ${pct}%만 회상했습니다. 현재 간격이 길거나 연체 영향이 클 수 있습니다.`);
     }
   }
 
   // 혼동쌍 감소
-  if (data.topConfusions.length > 0) {
-    const top = data.topConfusions[0];
+  if (data.confusionMetrics.top_confusions.length > 0) {
+    const top = data.confusionMetrics.top_confusions[0];
     insights.push(`이번 주 가장 많이 틀린 항목은 '${top.surface}'입니다 (오류 유형: ${errorLabel(top.error_type)}).`);
   }
 
   // 연체 회복
   if (data.overdueDays >= 3) {
     insights.push(`${data.overdueDays}일 연체가 발생했습니다. 회복 플랜을 통해 복습 부담을 분산하겠습니다.`);
+  }
+
+  if (data.recoveryMetrics.recovery_completion_rate > 0) {
+    const pct = Math.round(data.recoveryMetrics.recovery_completion_rate * 100);
+    insights.push(`예정 시점에 가깝게 수행한 복습 비율은 ${pct}%입니다.`);
   }
 
   // 스트릭 (벌점이 아닌 긍정 메시지만)
@@ -317,4 +436,31 @@ function errorLabel(errorType: string): string {
 
 function round2(v: number): number {
   return Math.round(v * 100) / 100;
+}
+
+function isDueBasedReview(row: RetentionObservation): boolean {
+  if (!row.due_ts_at_review || row.interval_days_at_review == null) return false;
+  return new Date(row.ts).getTime() >= new Date(row.due_ts_at_review).getTime();
+}
+
+function latenessDays(row: RetentionObservation): number {
+  if (!row.due_ts_at_review) return 0;
+  const latenessMs = new Date(row.ts).getTime() - new Date(row.due_ts_at_review).getTime();
+  return Math.max(0, latenessMs / (1000 * 60 * 60 * 24));
+}
+
+function estimateRecoveryTimeToNormalDays(dailyRows: DailyStats[]): number | null {
+  const latestOverdueIndex = dailyRows.reduce((latest, row, index) => {
+    return Number(row.lateness_p50_sec) > 0 ? index : latest;
+  }, -1);
+
+  if (latestOverdueIndex === -1) return 0;
+
+  for (let i = latestOverdueIndex + 1; i < dailyRows.length; i++) {
+    if (Number(dailyRows[i].reviews) > 0 && Number(dailyRows[i].lateness_p50_sec) <= 0) {
+      return i - latestOverdueIndex;
+    }
+  }
+
+  return null;
 }

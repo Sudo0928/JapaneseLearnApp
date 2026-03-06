@@ -4,7 +4,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { requireAuth } from '../middleware/auth';
+import { requireAdminKey, requireAuth } from '../middleware/auth';
 import {
   getUserAssignments,
   validateAaBalance,
@@ -33,7 +33,7 @@ router.get('/assignments', requireAuth, async (req: Request, res: Response): Pro
  * GET /v1/experiments/aa-validate?exp_id=aa_baseline_v1
  * A/A 테스트 균형 검증 (개발/운영 도구)
  */
-router.get('/aa-validate', async (req: Request, res: Response): Promise<void> => {
+router.get('/aa-validate', requireAdminKey, async (req: Request, res: Response): Promise<void> => {
   const expId = req.query.exp_id as string;
   if (!expId) {
     res.status(400).json({ error: 'exp_id 쿼리 파라미터가 필요합니다.' });

@@ -4,7 +4,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { requireAuth } from '../middleware/auth';
+import { requireAdminKey, requireAuth } from '../middleware/auth';
 import { generateWeeklyReport, runDailyAggBatch, upsertDailyAgg } from '../services/report-service';
 
 const router = Router();
@@ -32,12 +32,7 @@ router.get('/weekly', requireAuth, async (req: Request, res: Response): Promise<
  * POST /v1/report/batch
  * 일배치 수동 트리거 (개발/관리자용, 프로덕션에서는 크론으로 실행)
  */
-router.post('/batch', async (_req: Request, res: Response): Promise<void> => {
-  if (process.env.NODE_ENV === 'production') {
-    res.status(403).json({ error: '프로덕션에서는 크론 스케줄러를 사용하세요.' });
-    return;
-  }
-
+router.post('/batch', requireAdminKey, async (_req: Request, res: Response): Promise<void> => {
   try {
     const result = await runDailyAggBatch();
     res.json({ message: '일배치 완료', ...result });

@@ -90,7 +90,25 @@ export async function getTodayCards(
  * review_log는 append-only이므로 INSERT만 수행한다.
  * card_state는 UPSERT로 갱신한다.
  */
-export async function applyReviewResult(event: ReviewEvent): Promise<CardState> {
+export interface ApplyReviewResultResult {
+  state: CardState;
+  inserted: boolean;
+}
+
+function buildReviewSnapshot(current: CardState | null) {
+  return {
+    due_ts_at_review: current?.due_ts ?? null,
+    interval_days_at_review: current?.interval_days ?? null,
+    ease_factor_at_review: current?.ease_factor ?? null,
+    repetitions_at_review: current?.repetitions ?? null,
+    state_at_review: current?.state ?? null,
+    is_new_at_review: current ? current.state === 'new' : null,
+  };
+}
+
+export async function applyReviewResultWithStatus(
+  event: ReviewEvent
+): Promise<ApplyReviewResultResult> {
   const client: PoolClient = await pool.connect();
 
   try {
@@ -104,6 +122,8 @@ export async function applyReviewResult(event: ReviewEvent): Promise<CardState> 
 
     const current = rows[0] ?? null;
 
+    const snapshot = buildReviewSnapshot(current);
+
     // SM-2 다음 스케줄 계산
     const schedule = scheduleNext(
       current,
@@ -116,49 +136,24 @@ export async function applyReviewResult(event: ReviewEvent): Promise<CardState> 
       new Date(event.ts)
     );
 
-    // card_state UPSERT
-    const { rows: updatedRows } = await client.query<CardState>(
-      `
-      INSERT INTO card_state (
-        user_id, card_id,
-        due_ts, interval_days, ease_factor, repetitions, stability, state,
-        last_reviewed_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      ON CONFLICT (user_id, card_id) DO UPDATE SET
-        due_ts           = EXCLUDED.due_ts,
-        interval_days    = EXCLUDED.interval_days,
-        ease_factor      = EXCLUDED.ease_factor,
-        repetitions      = EXCLUDED.repetitions,
-        state            = EXCLUDED.state,
-        last_reviewed_at = EXCLUDED.last_reviewed_at
-      RETURNING *
-      `,
-      [
-        event.user_id,
-        event.card_id,
-        schedule.due_ts,
-        schedule.interval_days,
-        schedule.ease_factor,
-        schedule.repetitions,
-        current?.stability ?? 0,
-        schedule.state,
-        new Date(event.ts),
-      ]
-    );
-
-    // review_log 삽입 (idempotency: ON CONFLICT DO NOTHING)
-    await client.query(
+    // review_log 삽입이 성공한 경우에만 card_state를 갱신한다.
+    // 이렇게 해야 동일 event_id 재전송 시 스케줄이 두 번 전진하지 않는다.
+    const { rows: insertedRows } = await client.query<{ event_id: string }>(
       `
       INSERT INTO review_log (
         event_id, user_id, card_id, item_id, ts,
         prompt_type, correct, rt_ms, attempt_count, hint_level,
-        confidence, error_type, device, offline, schema_version
+        confidence, error_type, device, offline, schema_version,
+        due_ts_at_review, interval_days_at_review, ease_factor_at_review,
+        repetitions_at_review, state_at_review, is_new_at_review
       ) VALUES (
         $1, $2, $3, $4, $5::TIMESTAMPTZ,
         $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15
+        $11, $12, $13, $14, $15,
+        $16, $17, $18, $19, $20, $21
       )
       ON CONFLICT (event_id) DO NOTHING
+      RETURNING event_id
       `,
       [
         event.event_id,
@@ -176,17 +171,74 @@ export async function applyReviewResult(event: ReviewEvent): Promise<CardState> 
         event.device ?? 'UNKNOWN',
         event.offline ?? false,
         event.schema_version ?? '1.0.0',
+        snapshot.due_ts_at_review,
+        snapshot.interval_days_at_review,
+        snapshot.ease_factor_at_review,
+        snapshot.repetitions_at_review,
+        snapshot.state_at_review,
+        snapshot.is_new_at_review,
+      ]
+    );
+
+    if (insertedRows.length === 0) {
+      const { rows: latestRows } = await client.query<CardState>(
+        `SELECT * FROM card_state WHERE user_id = $1 AND card_id = $2`,
+        [event.user_id, event.card_id]
+      );
+
+      await client.query('COMMIT');
+
+      if (latestRows.length === 0) {
+        throw new Error(`중복 이벤트(${event.event_id})가 존재하지만 card_state가 없습니다.`);
+      }
+
+      return { state: latestRows[0], inserted: false };
+    }
+
+    // card_state UPSERT
+    const { rows: updatedRows } = await client.query<CardState>(
+      `
+      INSERT INTO card_state (
+        user_id, card_id,
+        due_ts, interval_days, ease_factor, repetitions, stability, state,
+        last_reviewed_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ON CONFLICT (user_id, card_id) DO UPDATE SET
+        due_ts           = EXCLUDED.due_ts,
+        interval_days    = EXCLUDED.interval_days,
+        ease_factor      = EXCLUDED.ease_factor,
+        repetitions      = EXCLUDED.repetitions,
+        stability        = EXCLUDED.stability,
+        state            = EXCLUDED.state,
+        last_reviewed_at = EXCLUDED.last_reviewed_at
+      RETURNING *
+      `,
+      [
+        event.user_id,
+        event.card_id,
+        schedule.due_ts,
+        schedule.interval_days,
+        schedule.ease_factor,
+        schedule.repetitions,
+        current?.stability ?? 0,
+        schedule.state,
+        new Date(event.ts),
       ]
     );
 
     await client.query('COMMIT');
-    return updatedRows[0];
+    return { state: updatedRows[0], inserted: true };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();
   }
+}
+
+export async function applyReviewResult(event: ReviewEvent): Promise<CardState> {
+  const result = await applyReviewResultWithStatus(event);
+  return result.state;
 }
 
 /**
@@ -208,7 +260,7 @@ export async function replayEventsToCardState(events: ReviewEvent[]): Promise<vo
 
   for (const event of sorted) {
     try {
-      await applyReviewResult(event);
+      await applyReviewResultWithStatus(event);
     } catch (err) {
       console.warn(
         `[replayEventsToCardState] event_id=${event.event_id} 처리 실패 (건너뜀):`,

@@ -107,6 +107,7 @@ export async function scheduleDailyStudyReminder(prefs: NotificationPrefs): Prom
       data: { type: 'study_reminder' },
     },
     trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
       hour: startH,
       minute: startM ?? 0,
       repeats: true,
@@ -136,6 +137,7 @@ export async function scheduleRecoveryReminder(
       data: { type: 'recovery_plan', overdue_count: overdueCount },
     },
     trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.CALENDAR,
       hour: reminderHour,
       minute: endM ?? 0,
       repeats: false,

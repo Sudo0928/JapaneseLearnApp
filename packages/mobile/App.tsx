@@ -18,7 +18,8 @@ import {
   getValidAppToken,
   clearAuthData,
   secureGet,
-  secureSet,
+  setDiagnosisDone,
+  getDiagnosisDone,
   STORAGE_KEYS,
 } from './src/services/secure-storage';
 import LoginScreen    from './src/screens/LoginScreen';
@@ -43,7 +44,6 @@ export default function App() {
     const token = await getValidAppToken();
     if (token) {
       const uid      = await secureGet(STORAGE_KEYS.USER_ID);
-      const diagDone = await secureGet(STORAGE_KEYS.DIAGNOSIS_DONE);
 
       // 구 user ID(dev-user-web) 마이그레이션: 스키마 패턴 ^u_[...] 를 만족하지 않으면 로그아웃
       if (uid && !uid.startsWith('u_')) {
@@ -53,7 +53,13 @@ export default function App() {
       }
 
       setUserId(uid);
-      setAppState(diagDone === '1' ? 'authenticated' : 'diagnosis');
+      if (!uid) {
+        setAppState('unauthenticated');
+        return;
+      }
+
+      const diagDone = await getDiagnosisDone(uid);
+      setAppState(diagDone ? 'authenticated' : 'diagnosis');
     } else {
       setAppState('unauthenticated');
     }
@@ -61,24 +67,27 @@ export default function App() {
 
   async function handleLoginComplete(uid: string) {
     setUserId(uid);
-    const diagDone = await secureGet(STORAGE_KEYS.DIAGNOSIS_DONE);
-    setAppState(diagDone === '1' ? 'authenticated' : 'diagnosis');
+    const diagDone = await getDiagnosisDone(uid);
+    setAppState(diagDone ? 'authenticated' : 'diagnosis');
   }
 
   async function handleDiagnosisComplete() {
-    await secureSet(STORAGE_KEYS.DIAGNOSIS_DONE, '1');
+    if (!userId) return;
+    await setDiagnosisDone(userId, true);
     setAppState('authenticated');
     setActiveTab('home');
   }
 
   async function handleDiagnosisSkip() {
-    await secureSet(STORAGE_KEYS.DIAGNOSIS_DONE, '1');
+    if (!userId) return;
+    await setDiagnosisDone(userId, true);
     setAppState('authenticated');
     setActiveTab('home');
   }
 
   async function handleRestartDiagnosis() {
-    await secureSet(STORAGE_KEYS.DIAGNOSIS_DONE, '0');
+    if (!userId) return;
+    await setDiagnosisDone(userId, false);
     setAppState('diagnosis');
   }
 

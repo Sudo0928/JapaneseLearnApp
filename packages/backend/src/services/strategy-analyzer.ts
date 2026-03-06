@@ -87,9 +87,8 @@ export async function computeStrategyVector(
       rl.rt_ms,
       rl.hint_level,
       rl.error_type,
-      EXTRACT(EPOCH FROM (rl.ts - cs.due_ts)) AS lateness_sec
+      EXTRACT(EPOCH FROM (rl.ts - rl.due_ts_at_review)) AS lateness_sec
     FROM review_log rl
-    LEFT JOIN card_state cs ON cs.user_id = rl.user_id AND cs.card_id = rl.card_id
     WHERE rl.user_id = $1
       AND rl.ts >= NOW() - ($2 || ' days')::INTERVAL
     ORDER BY rl.ts DESC
