@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# build outputs
+dist/
+build/
+coverage/
+**/dist/
+**/build/
+**/coverage/
+*.tsbuildinfo
+
+# logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# environment files
+.env
+.env.*
+!.env.example
+
+# Expo / React Native
+.expo/
+.expo-shared/
+packages/mobile/.expo/
+packages/mobile/web-build/
+
+# Vite
+.vite/
+
+# OS / temp files
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp

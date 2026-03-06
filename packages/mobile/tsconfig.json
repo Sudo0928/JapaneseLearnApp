@@ -1,0 +1,9 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "@japanese-learn/shared": ["../shared/src"]
+    }
+  }
+}

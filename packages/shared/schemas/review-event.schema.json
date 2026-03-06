@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://japanese-learn-app/schemas/review-event/v1",
+  "title": "ReviewEvent",
+  "description": "학습 세션 중 발생하는 단일 카드 복습 이벤트. append-only 로그로 저장된다.",
+  "version": "1.0.0",
+  "type": "object",
+  "required": [
+    "event_id",
+    "user_id",
+    "card_id",
+    "ts",
+    "prompt_type",
+    "correct",
+    "rt_ms"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "이벤트 고유 식별자 (idempotency 키). 형식: evt_{YYYYMMDD}_{uuid}",
+      "pattern": "^evt_[0-9]{8}_[a-zA-Z0-9_-]+$"
+    },
+    "user_id": {
+      "type": "string",
+      "description": "가명 처리된 사용자 식별자. 실제 이메일/이름 미포함.",
+      "pattern": "^u_[a-zA-Z0-9_-]+$"
+    },
+    "card_id": {
+      "type": "string",
+      "description": "카드 식별자. 형식: c_{item_id}_{prompt_type}",
+      "pattern": "^c_[a-zA-Z0-9_-]+$"
+    },
+    "item_id": {
+      "type": "string",
+      "description": "단어/한자 아이템 식별자 (카드의 원천 콘텐츠)",
+      "pattern": "^it_[a-zA-Z0-9_-]+$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "이벤트 발생 시각 (ISO 8601, 타임존 포함). 예: 2026-03-05T10:21:34+09:00"
+    },
+    "prompt_type": {
+      "type": "string",
+      "description": "문항 유형. 회상형(SURFACE_TO_*, MEANING_TO_SURFACE)과 인지형(MCQ, CLOZE, LISTENING)으로 구분.",
+      "enum": [
+        "SURFACE_TO_MEANING",
+        "MEANING_TO_SURFACE",
+        "SURFACE_TO_READING",
+        "MCQ",
+        "CLOZE",
+        "LISTENING"
+      ]
+    },
+    "correct": {
+      "type": "boolean",
+      "description": "정답 여부. true=정답, false=오답."
+    },
+    "rt_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 300000,
+      "description": "반응시간(밀리초). 문항 표시~제출까지. 최대 5분(300,000ms) 초과 시 타임아웃으로 처리."
+    },
+    "attempt_count": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "시도 횟수. 힌트 사용 후 재시도 포함."
+    },
+    "hint_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "default": 0,
+      "description": "힌트 단계. 0=사용 안 함, 1=첫 번째 힌트, 2=두 번째 힌트, 3=정답 공개."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "사용자 자기 확신도 (0.0=전혀 모름, 1.0=완전히 확신). 선택 수집."
+    },
+    "error_type": {
+      "type": "string",
+      "description": "오답 유형 분류. NONE=정답/미분류, READING_CONFUSION=읽기 혼동, FORM_SIMILAR=형태 유사 혼동, MEANING_NEAR=의미 근사 혼동, NO_RECALL=전혀 모름, TYPO=오타.",
+      "enum": [
+        "NONE",
+        "READING_CONFUSION",
+        "FORM_SIMILAR",
+        "MEANING_NEAR",
+        "NO_RECALL",
+        "TYPO"
+      ],
+      "default": "NONE"
+    },
+    "device": {
+      "type": "string",
+      "enum": ["IOS", "ANDROID", "WEB", "UNKNOWN"],
+      "default": "UNKNOWN",
+      "description": "학습 디바이스 종류."
+    },
+    "offline": {
+      "type": "boolean",
+      "default": false,
+      "description": "이벤트 발생 시점에 오프라인 상태였는지 여부."
+    },
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "스키마 버전. 하위 호환성 추적용."
+    }
+  },
+  "examples": [
+    {
+      "event_id": "evt_20260305_000001",
+      "user_id": "u_pseudo_8f0c2b",
+      "card_id": "c_it_KEIKEN_SURFACE_TO_READING",
+      "item_id": "it_KEIKEN",
+      "ts": "2026-03-05T10:21:34+09:00",
+      "prompt_type": "SURFACE_TO_READING",
+      "correct": false,
+      "rt_ms": 4820,
+      "attempt_count": 1,
+      "hint_level": 1,
+      "confidence": 0.6,
+      "error_type": "READING_CONFUSION",
+      "device": "ANDROID",
+      "offline": true,
+      "schema_version": "1.0.0"
+    }
+  ]
+}

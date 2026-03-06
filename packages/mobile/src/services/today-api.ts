@@ -1,0 +1,67 @@
+/**
+ * 오늘 할 일 API 클라이언트 (모바일)
+ *
+ * P0-2: 모든 요청에 Authorization: Bearer <token> 헤더 첨부
+ */
+
+import { ReviewEvent } from '@japanese-learn/shared';
+import { getValidAppToken } from './secure-storage';
+
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
+
+export interface CardWithItem {
+  card_id: string;
+  user_id: string;
+  due_ts: string;
+  interval_days: number;
+  ease_factor: number;
+  repetitions: number;
+  state: string;
+  prompt_type: string;
+  surface: string;
+  reading: string | null;
+  meaning_ko: string | null;
+  item_id: string;
+}
+
+export interface TodayResponse {
+  date: string;
+  userId: string;
+  reviewCards: CardWithItem[];
+  newCards: CardWithItem[];
+  confusionDrills: (CardWithItem & { isDrill?: boolean })[];   // P1-3
+  totalCount: number;
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getValidAppToken();
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+export async function fetchTodayCards(
+  _userId: string,
+  maxReview = 40,
+  maxNew = 6
+): Promise<TodayResponse> {
+  const url = `${BACKEND_URL}/v1/today?maxReview=${maxReview}&maxNew=${maxNew}`;
+  const res = await fetch(url, { headers: await authHeaders() });
+  if (!res.ok) throw new Error(`오늘 할 일 조회 실패: ${res.status}`);
+  return res.json();
+}
+
+export async function submitReview(event: ReviewEvent): Promise<{
+  nextDue: string;
+  intervalDays: number;
+  state: string;
+}> {
+  const res = await fetch(`${BACKEND_URL}/v1/today/review`, {
+    method: 'POST',
+    headers: await authHeaders(),
+    body: JSON.stringify(event),
+  });
+  if (!res.ok) throw new Error(`복습 제출 실패: ${res.status}`);
+  return res.json();
+}
