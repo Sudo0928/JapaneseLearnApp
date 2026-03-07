@@ -14,7 +14,6 @@ import type {
   WeeklyReport,
   ExperimentAssignment,
   AssignmentsResponse,
-  AaValidationResponse,
   PlanResponse,
 } from '@japanese-learn/shared';
 
@@ -95,14 +94,10 @@ export async function fetchWeeklyReport(): Promise<WeeklyReport> {
 
 // ─── 실험 현황 ───────────────────────────────────────────────
 
-export type { ExperimentAssignment, AssignmentsResponse, AaValidationResponse };
+export type { ExperimentAssignment, AssignmentsResponse };
 
 export async function fetchExperiments(): Promise<AssignmentsResponse> {
   return request<AssignmentsResponse>('/experiments/assignments');
-}
-
-export async function fetchAaValidation(): Promise<AaValidationResponse> {
-  return request<AaValidationResponse>('/experiments/aa-validate');
 }
 
 // ─── 플랜 생성 ───────────────────────────────────────────────

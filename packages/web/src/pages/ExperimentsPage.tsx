@@ -1,22 +1,16 @@
 import { useEffect, useState } from 'react';
-import { fetchExperiments, fetchAaValidation, ExperimentAssignment } from '../services/api';
+import { fetchExperiments, ExperimentAssignment } from '../services/api';
 import styles from '../styles';
 
 export default function ExperimentsPage() {
   const [assignments, setAssignments] = useState<ExperimentAssignment[]>([]);
-  const [aaBalance, setAaBalance] = useState<{
-    control_count: number;
-    treatment_count: number;
-    is_balanced: boolean;
-  } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    Promise.all([fetchExperiments(), fetchAaValidation()])
-      .then(([exp, aa]) => {
+    fetchExperiments()
+      .then((exp) => {
         setAssignments(exp.assignments);
-        setAaBalance(aa);
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
@@ -27,37 +21,12 @@ export default function ExperimentsPage() {
 
   return (
     <div style={styles.page}>
-      <h2 style={styles.heading}>실험 현황 (A/B)</h2>
-
-      {/* A/A 균형 검증 */}
-      {aaBalance && (
-        <div style={{ ...styles.insightBox, marginBottom: 24 }}>
-          <h3 style={styles.sectionTitle}>A/A 균형 검증</h3>
-          <div style={styles.kpiRow}>
-            <div style={styles.kpiCard}>
-              <div style={{ ...styles.kpiValue, color: '#6366f1' }}>{aaBalance.control_count}</div>
-              <div style={styles.kpiLabel}>Control</div>
-            </div>
-            <div style={styles.kpiCard}>
-              <div style={{ ...styles.kpiValue, color: '#059669' }}>{aaBalance.treatment_count}</div>
-              <div style={styles.kpiLabel}>Treatment</div>
-            </div>
-            <div style={styles.kpiCard}>
-              <div style={{
-                ...styles.kpiValue,
-                color: aaBalance.is_balanced ? '#059669' : '#ef4444',
-              }}>
-                {aaBalance.is_balanced ? '균형 OK' : '불균형 주의'}
-              </div>
-              <div style={styles.kpiLabel}>상태</div>
-            </div>
-          </div>
-        </div>
-      )}
+      <h2 style={styles.heading}>내 실험 배정</h2>
+      <p style={styles.subtext}>운영 검증(A/A 균형, 배치 실행)은 관리자 도구에서만 확인합니다.</p>
 
       {/* 배정 목록 */}
       <div style={styles.confusionBox}>
-        <h3 style={styles.sectionTitle}>내 실험 배정</h3>
+        <h3 style={styles.sectionTitle}>활성 실험</h3>
         {assignments.length === 0 ? (
           <p style={{ color: '#64748b' }}>배정된 실험 없음</p>
         ) : (

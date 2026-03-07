@@ -23,12 +23,12 @@
     },
     "user_id": {
       "type": "string",
-      "description": "가명 처리된 사용자 식별자. 실제 이메일/이름 미포함.",
+      "description": "가명 처리된 사용자 식별자. 공개 요청에서는 받지 않고 서버가 JWT에서 주입한다.",
       "pattern": "^u_[a-zA-Z0-9_-]+$"
     },
     "card_id": {
       "type": "string",
-      "description": "카드 식별자. 형식: c_{item_id}_{prompt_type}",
+      "description": "카드 식별자. 현재는 c_{item_id}_{short_code}(예: STM/STR/MTS) 형식의 opaque id로 취급한다.",
       "pattern": "^c_[a-zA-Z0-9_-]+$"
     },
     "item_id": {
@@ -116,7 +116,7 @@
     {
       "event_id": "evt_20260305_000001",
       "user_id": "u_pseudo_8f0c2b",
-      "card_id": "c_it_KEIKEN_SURFACE_TO_READING",
+      "card_id": "c_it_KEIKEN_STR",
       "item_id": "it_KEIKEN",
       "ts": "2026-03-05T10:21:34+09:00",
       "prompt_type": "SURFACE_TO_READING",

@@ -4,37 +4,12 @@
  * P0-2: 모든 요청에 Authorization: Bearer <token> 헤더 첨부
  */
 
-import { ReviewEvent } from '@japanese-learn/shared';
-import type { PlanResponse, PlanUiPolicy } from '@japanese-learn/shared';
+import type { ReviewEventInput, TodayCard, TodayResponse } from '@japanese-learn/shared';
 import { getValidAppToken } from './secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
-export interface CardWithItem {
-  card_id: string;
-  user_id: string;
-  due_ts: string;
-  interval_days: number;
-  ease_factor: number;
-  repetitions: number;
-  state: string;
-  prompt_type: string;
-  surface: string;
-  reading: string | null;
-  meaning_ko: string | null;
-  item_id: string;
-}
-
-export interface TodayResponse {
-  date: string;
-  userId: string;
-  reviewCards: CardWithItem[];
-  newCards: CardWithItem[];
-  confusionDrills: (CardWithItem & { isDrill?: boolean })[];   // P1-3
-  totalCount: number;
-  plan: PlanResponse;
-  uiPolicy: PlanUiPolicy;
-}
+export type CardWithItem = TodayCard;
 
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getValidAppToken();
@@ -55,7 +30,7 @@ export async function fetchTodayCards(
   return res.json();
 }
 
-export async function submitReview(event: ReviewEvent): Promise<{
+export async function submitReview(event: ReviewEventInput): Promise<{
   nextDue: string;
   intervalDays: number;
   state: string;

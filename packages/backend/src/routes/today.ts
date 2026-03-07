@@ -10,7 +10,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { getTodayCards, applyReviewResult } from '../services/card-state-service';
+import { getTodayCards, applyReviewResult, ensureAllCardStatesForUser } from '../services/card-state-service';
 import { validateReviewEvent } from '../services/event-validator';
 import { requireAuth } from '../middleware/auth';
 import { getConfusionDrillCards } from '../services/confusion-drill-service';
@@ -39,6 +39,8 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
   }
 
   try {
+    await ensureAllCardStatesForUser(userId);
+
     const plan = await generatePlan({
       user_id: userId,
       date: new Date().toISOString().slice(0, 10),
@@ -88,7 +90,7 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
 
 /**
  * POST /v1/today/review — 복습 결과 제출
- * Body: ReviewEvent (단건)
+ * Body: ReviewEventInput (단건)
  *
  * P0-2: requireAuth 적용 — event.user_id를 req.userId로 강제 덮어쓴다.
  * 이 엔드포인트는 review_log 저장 + card_state 갱신을 트랜잭션으로 처리한다.

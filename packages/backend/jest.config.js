@@ -5,6 +5,6 @@ module.exports = {
   roots: ['<rootDir>/src'],
   testMatch: ['**/__tests__/**/*.test.ts'],
   moduleNameMapper: {
-    '^@japanese-learn/shared$': '<rootDir>/../shared/src',
+    '^@japanese-learn/shared$': '<rootDir>/../shared/src/index.ts',
   },
 };

@@ -41,12 +41,6 @@ export default function ReportScreen({ userId }: { userId?: string }) {
     }
 
     try {
-      // 배치 집계를 먼저 강제 실행해 최신 데이터 반영
-      await fetch(`${BACKEND_URL}/v1/report/batch`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-      }).catch(() => {});
-
       const res = await fetch(`${BACKEND_URL}/v1/report/weekly`, {
         headers: { Authorization: `Bearer ${token}` },
       });

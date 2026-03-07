@@ -66,7 +66,11 @@ export async function getConfusionDrillCards(
       i.surface,
       i.reading,
       i.meaning_ko,
-      i.item_id
+      i.item_id,
+      i.example_sentence_ja,
+      i.example_sentence_ko,
+      i.audio_ref,
+      c.prompt_payload
     FROM card_state cs
     JOIN cards c ON c.card_id = cs.card_id
     JOIN items i ON i.item_id = c.item_id

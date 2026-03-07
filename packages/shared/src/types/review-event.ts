@@ -25,13 +25,12 @@ export type ErrorType =
 export type DeviceType = 'IOS' | 'ANDROID' | 'WEB' | 'UNKNOWN';
 
 /**
- * 학습 이벤트 전체 구조 (저장 및 전송 공용)
+ * 클라이언트가 로컬 큐와 HTTP 요청에서 사용하는 공개 이벤트 계약.
+ * user_id는 서버가 JWT에서 주입하므로 포함하지 않는다.
  */
-export interface ReviewEvent {
+export interface ReviewEventInput {
   /** 이벤트 고유 식별자 (idempotency 키). 형식: evt_{YYYYMMDD}_{uuid} */
   event_id: string;
-  /** 가명 처리된 사용자 식별자 */
-  user_id: string;
   /** 카드 식별자. 형식: c_{item_id}_{prompt_type} */
   card_id: string;
   /** 단어/한자 아이템 식별자 */
@@ -59,6 +58,22 @@ export interface ReviewEvent {
   /** 스키마 버전 */
   schema_version?: string;
 }
+
+/**
+ * 서버가 저장하는 최종 이벤트 구조.
+ * user_id는 클라이언트 입력이 아니라 서버 인증 정보에서만 채운다.
+ */
+export interface ReviewEvent extends ReviewEventInput {
+  /** 가명 처리된 사용자 식별자. 서버가 JWT에서 주입한다. */
+  user_id: string;
+}
+
+/**
+ * 세션 화면이 제출 직전에 생성하는 이벤트 초안.
+ */
+export type ReviewEventDraft = Omit<ReviewEventInput, 'event_id' | 'ts' | 'schema_version'> & {
+  ts?: string;
+};
 
 /**
  * 서버 수신용 — 필수 필드 + 기본값 보장된 정규화 버전
@@ -95,15 +110,14 @@ export function generateEventId(): string {
 }
 
 /**
- * 클라이언트측 간이 스키마 검증 (필수 필드 존재 여부 확인)
- * 서버측에서는 JSON Schema 전체 검증을 수행한다.
+ * 클라이언트측 간이 스키마 검증 (공개 입력 계약 기준)
+ * 서버측에서는 user_id를 주입한 뒤 JSON Schema 전체 검증을 수행한다.
  */
-export function validateReviewEventBasic(event: unknown): event is ReviewEvent {
+export function validateReviewEventBasic(event: unknown): event is ReviewEventInput {
   if (typeof event !== 'object' || event === null) return false;
   const e = event as Record<string, unknown>;
   return (
     typeof e.event_id === 'string' &&
-    typeof e.user_id === 'string' &&
     typeof e.card_id === 'string' &&
     typeof e.ts === 'string' &&
     typeof e.prompt_type === 'string' &&

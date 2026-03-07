@@ -4,6 +4,20 @@ import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+
+          if (id.includes('react-router-dom')) return 'router';
+          if (id.includes('recharts') || id.includes('d3-') || id.includes('internmap')) return 'charts';
+
+          return 'vendor';
+        },
+      },
+    },
+  },
   server: {
     port: 5200,
     strictPort: true,

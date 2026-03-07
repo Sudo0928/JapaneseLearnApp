@@ -12,18 +12,27 @@ export interface AuthGoogleRequest {
   device?: string;
 }
 
+export interface ConsentFlags {
+  required: boolean;
+  optional: boolean;
+  research: boolean;
+  version?: string;
+  agreed_at?: string;
+}
+
 export interface AuthGoogleResponse {
   appToken: string;
   expiresAt: string;
   userId: string;
   isNewUser: boolean;
+  readyForStudy: boolean;
 }
 
 export interface MeResponse {
   user_id: string;
   tz: string | null;
   locale: string | null;
-  consent_flags: Record<string, unknown>;
+  consent_flags: ConsentFlags;
   created_at: string;
 }
 
@@ -42,6 +51,10 @@ export interface TodayCard {
   reading: string | null;
   meaning_ko: string | null;
   item_id: string;
+  example_sentence_ja?: string | null;
+  example_sentence_ko?: string | null;
+  audio_ref?: string | null;
+  prompt_payload?: Record<string, unknown> | null;
   isDrill?: boolean;   // true면 혼동쌍 처방 드릴 (P1-3)
 }
 
@@ -91,6 +104,44 @@ export interface PlanResponse {
   retention_target: number;
   notes: string[];
   experiment_variant?: string;   // P1-2: 실험 배정 정보
+}
+
+// ─── 진단 ────────────────────────────────────────────────────
+
+export interface DiagnosisSubmitV2Request {
+  phase: 'cognitive_v2';
+  self_assessment?: {
+    target_level?: string;
+    daily_minutes?: number;
+    weak_areas?: string[];
+  };
+  memory_pairs: {
+    recall_correct: number;
+    recall_total: number;
+    recognition_correct: number;
+    recognition_total: number;
+    avg_rt_ms: number;
+  };
+  digit_span: {
+    max_correct_span: number;
+  };
+  visual_discrimination: {
+    correct: number;
+    total: number;
+    avg_rt_ms: number;
+  };
+}
+
+export interface DiagnosisResultResponse {
+  strategy_vector: {
+    recall_gap: number;
+    reading_weak: number;
+    form_weak: number;
+    load_sensitive: number;
+    lateness_fragile?: number;
+  };
+  weakness_flags: string[];
+  notes: string[];
 }
 
 // ─── 리포트 ──────────────────────────────────────────────────
@@ -176,12 +227,4 @@ export interface ExperimentAssignment {
 export interface AssignmentsResponse {
   assignments: ExperimentAssignment[];
   computed_at: string;
-}
-
-export interface AaValidationResponse {
-  exp_id: string;
-  control_count: number;
-  treatment_count: number;
-  balance_ratio: number;
-  is_balanced: boolean;
 }

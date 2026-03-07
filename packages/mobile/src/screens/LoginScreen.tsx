@@ -3,8 +3,8 @@
  *
  * 흐름:
  * 1) Google 로그인 버튼 → 외부 브라우저(RFC 8252) → PKCE 인증
- * 2) 신규 사용자 → ConsentScreen으로 이동
- * 3) 기존 사용자 (동의 완료) → 메인 화면으로 이동
+ * 2) 토큰 저장 후 App.tsx bootstrap으로 이동
+ * 3) consent 여부는 `/v1/auth/me` 기반으로 App 루트에서 판정
  */
 
 import React, { useState } from 'react';
@@ -20,17 +20,12 @@ import {
 } from 'react-native';
 import { useGoogleLogin } from '../services/auth-service';
 import { saveAppToken, secureSet, STORAGE_KEYS } from '../services/secure-storage';
-import ConsentScreen, { ConsentFlags } from './ConsentScreen';
 
 interface LoginScreenProps {
   onLoginComplete: (userId: string) => void;
 }
 
-type LoginPhase = 'login' | 'consent';
-
 export default function LoginScreen({ onLoginComplete }: LoginScreenProps) {
-  const [phase, setPhase] = useState<LoginPhase>('login');
-  const [pendingUserId, setPendingUserId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
   const { login, isLoading: oauthLoading } = useGoogleLogin();
@@ -46,23 +41,10 @@ export default function LoginScreen({ onLoginComplete }: LoginScreenProps) {
       }
 
       const { userId, isNewUser } = result;
-
-      if (isNewUser) {
-        // 신규 사용자 → 동의 화면
-        setPendingUserId(userId ?? null);
-        setPhase('consent');
-      } else {
-        // 기존 사용자 → 바로 메인 화면
-        onLoginComplete(userId!);
-      }
+      void isNewUser;
+      onLoginComplete(userId!);
     } finally {
       setIsLoading(false);
-    }
-  }
-
-  function handleConsentComplete(_flags: ConsentFlags) {
-    if (pendingUserId) {
-      onLoginComplete(pendingUserId);
     }
   }
 
@@ -91,10 +73,6 @@ export default function LoginScreen({ onLoginComplete }: LoginScreenProps) {
     } finally {
       setIsLoading(false);
     }
-  }
-
-  if (phase === 'consent') {
-    return <ConsentScreen onConsentComplete={handleConsentComplete} />;
   }
 
   const busy = isLoading || oauthLoading;

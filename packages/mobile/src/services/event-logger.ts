@@ -10,24 +10,22 @@
  */
 
 import NetInfo from '@react-native-community/netinfo';
-import { ReviewEvent, generateEventId } from '@japanese-learn/shared';
+import { ReviewEventDraft, ReviewEventInput, generateEventId } from '@japanese-learn/shared';
 import { enqueueEvent, getPendingEvents, markAsSynced, markSyncFailed } from '../db/local-queue';
 import { getValidAppToken } from './secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 const SYNC_BATCH_SIZE = 50;
 
-export type LogEventInput = Omit<ReviewEvent, 'event_id' | 'ts' | 'schema_version'> & {
-  ts?: string;
-};
+export type LogEventInput = ReviewEventDraft;
 
 /**
  * 학습 이벤트 기록 진입점
  *
  * 호출 위치: 학습 세션 화면에서 문항 제출 시
  */
-export async function logReviewEvent(input: LogEventInput): Promise<ReviewEvent> {
-  const event: ReviewEvent = {
+export async function logReviewEvent(input: LogEventInput): Promise<ReviewEventInput> {
+  const event: ReviewEventInput = {
     ...input,
     event_id: generateEventId(),
     ts: input.ts ?? new Date().toISOString(),

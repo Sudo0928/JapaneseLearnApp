@@ -22,7 +22,7 @@ import {
   getQueueStats,
 } from '../db/local-queue';
 import { getValidAppToken } from './secure-storage';
-import { ReviewEvent } from '@japanese-learn/shared';
+import { ReviewEventInput } from '@japanese-learn/shared';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
@@ -76,7 +76,7 @@ async function emitStatus(): Promise<void> {
  * 서버의 ON CONFLICT DO NOTHING으로 중복은 안전하게 무시됨
  */
 async function uploadBatch(
-  events: ReviewEvent[],
+  events: ReviewEventInput[],
   token: string
 ): Promise<{ accepted: string[]; rejected: string[] }> {
   const response = await fetch(`${BACKEND_URL}/v1/events`, {

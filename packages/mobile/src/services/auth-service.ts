@@ -1,31 +1,27 @@
-/**
- * Google OAuth 2.0 + PKCE 로그인 서비스
- *
- * 보안 원칙 (RFC 8252 / RFC 9700):
- * - 외부 시스템 브라우저 사용 (인앱 WebView 금지)
- * - PKCE code_challenge_method = S256
- * - state 파라미터로 CSRF 방지
- * - 토큰은 expo-secure-store(Keychain/Keystore)에만 저장
- * - Google ID Token은 백엔드로 전달해 앱 JWT로 교환
- */
-
 import * as AuthSession from 'expo-auth-session';
+import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
 import { saveAppToken, clearAuthData, STORAGE_KEYS, secureSet } from './secure-storage';
 
-// 외부 브라우저 인증 완료 후 앱으로 복귀하기 위한 준비
 WebBrowser.maybeCompleteAuthSession();
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
-// 플랫폼별 Google OAuth 클라이언트 ID
-const GOOGLE_CLIENT_ID =
-  Platform.OS === 'ios'
-    ? process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS ?? ''
-    : Platform.OS === 'web'
-    ? process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB ?? ''
-    : process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID ?? '';
+function normalizeGoogleClientId(value?: string): string {
+  const trimmed = value?.trim() ?? '';
+  return trimmed.endsWith('.apps.googleusercontent.com') ? trimmed : '';
+}
+
+const GOOGLE_WEB_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB);
+const GOOGLE_IOS_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS);
+const GOOGLE_ANDROID_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID);
+
+function getCurrentPlatformClientId(): string {
+  if (Platform.OS === 'ios') return GOOGLE_IOS_CLIENT_ID;
+  if (Platform.OS === 'android') return GOOGLE_ANDROID_CLIENT_ID;
+  return GOOGLE_WEB_CLIENT_ID;
+}
 
 export interface LoginResult {
   success: boolean;
@@ -34,55 +30,100 @@ export interface LoginResult {
   error?: string;
 }
 
-/**
- * Google OAuth PKCE 로그인 훅
- *
- * 사용 예시:
- *   const { login, isLoading } = useGoogleLogin();
- *   <Button onPress={login} />
- */
-export function useGoogleLogin() {
-  // useAutoDiscovery는 반드시 Hook 내부에서 호출 (Rules of Hooks)
-  const discovery = AuthSession.useAutoDiscovery('https://accounts.google.com');
+function getMissingClientIdError(): LoginResult {
+  return {
+    success: false,
+    error: `Google OAuth client ID is missing for ${Platform.OS}. Check packages/mobile/.env.`,
+  };
+}
 
-  // PKCE + state를 자동 관리하는 AuthSession 훅
+function useGoogleWebLogin() {
+  const [request, , promptAsync] = Google.useIdTokenAuthRequest(
+    {
+      webClientId: GOOGLE_WEB_CLIENT_ID,
+      scopes: ['openid', 'email', 'profile'],
+      selectAccount: true,
+    },
+    { scheme: 'japaneselearn' }
+  );
+
+  async function login(): Promise<LoginResult> {
+    if (!GOOGLE_WEB_CLIENT_ID) {
+      return getMissingClientIdError();
+    }
+
+    if (!request) {
+      return { success: false, error: 'OAuth request is still loading. Try again in a moment.' };
+    }
+
+    const result = await promptAsync();
+
+    if (result.type === 'cancel' || result.type === 'dismiss') {
+      return { success: false, error: 'Login was cancelled.' };
+    }
+
+    if (result.type === 'error') {
+      return { success: false, error: result.error?.message ?? 'OAuth error occurred.' };
+    }
+
+    if (result.type !== 'success') {
+      return { success: false, error: 'Unexpected OAuth result.' };
+    }
+
+    const idToken = result.params.id_token;
+    if (!idToken) {
+      return { success: false, error: 'Google did not return an ID token.' };
+    }
+
+    return exchangeIdTokenForAppToken(idToken);
+  }
+
+  return { login, isLoading: !request };
+}
+
+function useGoogleNativeLogin() {
+  const discovery = AuthSession.useAutoDiscovery('https://accounts.google.com');
+  const nativeClientId = getCurrentPlatformClientId();
+  const redirectUri = AuthSession.makeRedirectUri({ scheme: 'japaneselearn' });
+
   const [request, , promptAsync] = AuthSession.useAuthRequest(
     {
-      clientId: GOOGLE_CLIENT_ID,
-      redirectUri: AuthSession.makeRedirectUri({ scheme: 'japaneselearn' }),
+      clientId: nativeClientId,
+      redirectUri,
       scopes: ['openid', 'email', 'profile'],
       responseType: AuthSession.ResponseType.Code,
-      // PKCE는 expo-auth-session이 자동으로 code_verifier/code_challenge 생성
       usePKCE: true,
     },
     discovery
   );
 
   async function login(): Promise<LoginResult> {
-    if (!request) {
-      return { success: false, error: 'OAuth 요청 준비 중입니다. 잠시 후 다시 시도하세요.' };
+    if (!nativeClientId) {
+      return getMissingClientIdError();
     }
 
-    // 외부 브라우저(시스템 브라우저)로 인증 화면 열기
+    if (!request) {
+      return { success: false, error: 'OAuth request is still loading. Try again in a moment.' };
+    }
+
     const result = await promptAsync();
 
     if (result.type === 'cancel' || result.type === 'dismiss') {
-      return { success: false, error: '로그인이 취소되었습니다.' };
+      return { success: false, error: 'Login was cancelled.' };
     }
 
     if (result.type === 'error') {
-      return { success: false, error: result.error?.message ?? '인증 오류가 발생했습니다.' };
+      return { success: false, error: result.error?.message ?? 'OAuth error occurred.' };
     }
 
     if (result.type !== 'success') {
-      return { success: false, error: '알 수 없는 오류가 발생했습니다.' };
+      return { success: false, error: 'Unexpected OAuth result.' };
     }
 
-    // Authorization Code → ID Token 교환 (PKCE code_verifier 포함)
     const tokenResponse = await AuthSession.exchangeCodeAsync(
       {
-        clientId: GOOGLE_CLIENT_ID,
-        redirectUri: AuthSession.makeRedirectUri({ scheme: 'japaneselearn' }),
+        clientId: nativeClientId,
+        redirectUri,
         code: result.params.code,
         extraParams: { code_verifier: request.codeVerifier ?? '' },
       },
@@ -91,20 +132,32 @@ export function useGoogleLogin() {
 
     const idToken = tokenResponse.idToken;
     if (!idToken) {
-      return { success: false, error: 'Google ID Token을 받지 못했습니다.' };
+      return { success: false, error: 'Google did not return an ID token.' };
     }
 
-    // 백엔드에 ID Token 전달 → 앱 JWT 수령
     return exchangeIdTokenForAppToken(idToken);
   }
 
   return { login, isLoading: !request };
 }
 
-/**
- * Google ID Token → 백엔드 앱 JWT 교환
- * (직접 호출 시에도 사용 가능)
- */
+export function useGoogleLogin() {
+  const clientId = getCurrentPlatformClientId();
+
+  if (!clientId) {
+    return {
+      login: async (): Promise<LoginResult> => getMissingClientIdError(),
+      isLoading: false,
+    };
+  }
+
+  if (Platform.OS === 'web') {
+    return useGoogleWebLogin();
+  }
+
+  return useGoogleNativeLogin();
+}
+
 export async function exchangeIdTokenForAppToken(idToken: string): Promise<LoginResult> {
   try {
     const res = await fetch(`${BACKEND_URL}/v1/auth/google`, {
@@ -112,30 +165,29 @@ export async function exchangeIdTokenForAppToken(idToken: string): Promise<Login
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         idToken,
-        device: Platform.OS === 'ios' ? 'IOS' : 'ANDROID',
+        device: Platform.OS === 'ios'
+          ? 'IOS'
+          : Platform.OS === 'android'
+            ? 'ANDROID'
+            : 'WEB',
       }),
     });
 
     if (!res.ok) {
-      const body = await res.json();
-      return { success: false, error: body.error ?? `서버 오류: ${res.status}` };
+      const body = await res.json().catch(() => ({ error: `Server error: ${res.status}` }));
+      return { success: false, error: body.error ?? `Server error: ${res.status}` };
     }
 
     const { appToken, expiresAt, userId, isNewUser } = await res.json();
-
-    // 앱 JWT + 만료시각 → Keychain/Keystore 저장
     await saveAppToken(appToken, expiresAt);
     await secureSet(STORAGE_KEYS.USER_ID, userId);
 
     return { success: true, userId, isNewUser };
   } catch (err) {
-    return { success: false, error: `네트워크 오류: ${String(err)}` };
+    return { success: false, error: `Network error: ${String(err)}` };
   }
 }
 
-/**
- * 로그아웃 — 서버 세션 폐기 + 로컬 토큰 삭제
- */
 export async function logout(appToken: string): Promise<void> {
   try {
     await fetch(`${BACKEND_URL}/v1/auth/logout`, {

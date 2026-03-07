@@ -229,12 +229,15 @@ RPO 만족: [ ] 예  [ ] 아니오 (실제 손실: XX분)
 | oauth_accounts | 계정 연결 해제 시 삭제 | 수동 또는 API |
 | push_token | 앱 삭제 또는 옵트아웃 시 | 알림 설정 OFF 시 NULL 처리 |
 
-### 사용자 데이터 삭제 API (미구현 → Phase 2)
+### 사용자 데이터 삭제 API (구현 완료)
 
 ```
-DELETE /v1/user/me  — 계정 및 모든 데이터 삭제
-GET    /v1/user/export  — 데이터 내보내기 (GDPR 이식권)
+DELETE /v1/auth/me  — 계정 및 모든 데이터 삭제
+GET    /v1/user/export  — 데이터 내보내기 (GDPR 이식권, 미구현)
 ```
+
+- `DELETE /v1/auth/me`는 `user_sessions`, `review_log`, `card_state`, `diagnosis_results`, `user_error_agg`, `user_daily_agg`, `notification_prefs`, `experiments`, `oauth_accounts`, `users`를 순차 삭제한다.
+- 삭제 후 기존 앱 토큰은 즉시 401이 되어야 한다.
 
 ---
 

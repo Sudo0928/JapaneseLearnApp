@@ -13,23 +13,12 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { getValidAppToken } from '../services/secure-storage';
-import type { PlanResponse } from '@japanese-learn/shared';
+import type { DiagnosisResultResponse, PlanResponse } from '@japanese-learn/shared';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
-interface StrategyVector {
-  recall_gap: number;
-  reading_weak: number;
-  form_weak: number;
-  load_sensitive: number;
-  lateness_fragile?: number;
-}
-
-interface DiagResult {
-  strategy_vector: StrategyVector;
-  weakness_flags: string[];
-  notes?: string[];
-}
+type StrategyVector = DiagnosisResultResponse['strategy_vector'];
+type DiagResult = DiagnosisResultResponse;
 
 interface PlanScreenProps {
   userId: string;
@@ -276,6 +265,16 @@ function buildPlanFromServer(plan: PlanResponse): { icon: string; label: string;
       icon: '🔘',
       label: '선택형(MCQ) 비율',
       value: `${Math.round((plan.mix.MCQ ?? 0) * 100)}%`,
+    },
+    {
+      icon: '🧩',
+      label: '문맥형(CLOZE) 비율',
+      value: `${Math.round((plan.mix.CLOZE ?? 0) * 100)}%`,
+    },
+    {
+      icon: '🔊',
+      label: '듣기형 비율',
+      value: `${Math.round((plan.mix.LISTENING ?? 0) * 100)}%`,
     },
     {
       icon: '💡',

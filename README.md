@@ -31,7 +31,8 @@
 │  ├─ mobile/    # Expo 모바일 앱
 │  ├─ shared/    # 공용 타입, 스키마, 계약
 │  └─ web/       # 웹 대시보드
-├─ migrations/   # PostgreSQL 마이그레이션
+│
+├─ packages/backend/migrations/   # PostgreSQL 마이그레이션
 ├─ docs/         # 설계, 보안, 운영, 백로그 문서
 ├─ PROGRESS.md   # 진행 기록 및 다음 작업
 └─ LICENSE       # 독점 사용 금지 라이선스
@@ -47,17 +48,18 @@
 - 오늘 할 일 API와 복습 제출 흐름
 - Google OAuth + PKCE 인증
 - 동의 화면 및 secure storage
-- 진단 테스트와 기본 개인화 플랜 생성
+- `GET /v1/auth/me` 기반 consent bootstrap
+- 진단 v2와 기본 개인화 플랜 생성
 - 주간 리포트, 알림, 실험 플래그 프레임워크
-- 웹 대시보드 기본 화면
+- 사용자/관리자 surface를 분리한 웹 대시보드 기본 화면
+- 웹 대시보드 route/charts chunk 분리 최적화
+- `/admin/operations` admin key persistence, masked key status, last-used tracking, and recent activity log
+- source tree 산출물 제거 + `check:generated` 검증 스크립트
+- 콘텐츠 확장을 위한 메타데이터/확장 prompt 카드 마이그레이션 (`011_content_metadata.sql`, `012_seed_content_metadata.sql`, `013_extended_prompt_cards.sql`)
 
 현재 우선 과제:
 
-- 온라인/오프라인 `event_id` 단일성 보장
-- 인증 경계 통일
-- 오프라인 ingest 이후 서버 스케줄 재적용
-- 데이터 삭제/철회 기능
-- 웹-백엔드 API 계약 정합성 보완
+- 데이터 export API와 운영 정책 확정
 
 자세한 진행 내역은 `PROGRESS.md`를 참고하세요.
 
@@ -106,6 +108,12 @@ npm run dashboard
 
 ```bash
 npm test
+```
+
+생성 산출물 검증:
+
+```bash
+npm run check:generated
 ```
 
 ## 환경 변수

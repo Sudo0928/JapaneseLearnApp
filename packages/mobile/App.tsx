@@ -8,12 +8,13 @@
  *  📈 리포트 — 주간 학습 리포트
  *
  * 온보딩 흐름:
- *  로그인 → (첫 방문 시) 진단 테스트 → 메인
+ *  로그인 → consent 확인(/v1/auth/me) → 진단 테스트 → 메인
  */
 
 import React, { useState, useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { View, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import type { MeResponse } from '@japanese-learn/shared';
 import {
   getValidAppToken,
   clearAuthData,
@@ -23,6 +24,7 @@ import {
   STORAGE_KEYS,
 } from './src/services/secure-storage';
 import LoginScreen    from './src/screens/LoginScreen';
+import ConsentScreen from './src/screens/ConsentScreen';
 import HomeScreen     from './src/screens/HomeScreen';
 import SessionScreen  from './src/screens/SessionScreen';
 import DiagnosisScreen from './src/screens/DiagnosisScreen';
@@ -31,19 +33,21 @@ import PlanScreen     from './src/screens/PlanScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 
 export type AppTab = 'home' | 'session' | 'plan' | 'report' | 'settings';
-type AppState = 'loading' | 'unauthenticated' | 'diagnosis' | 'authenticated';
+type AppState = 'loading' | 'unauthenticated' | 'consent' | 'diagnosis' | 'authenticated';
+
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('loading');
   const [userId, setUserId]     = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>('home');
 
-  useEffect(() => { checkAuth(); }, []);
+  useEffect(() => { void bootstrapAuthenticatedUser(); }, []);
 
-  async function checkAuth() {
+  async function bootstrapAuthenticatedUser(userIdOverride?: string) {
     const token = await getValidAppToken();
     if (token) {
-      const uid      = await secureGet(STORAGE_KEYS.USER_ID);
+      const uid = userIdOverride ?? await secureGet(STORAGE_KEYS.USER_ID);
 
       // 구 user ID(dev-user-web) 마이그레이션: 스키마 패턴 ^u_[...] 를 만족하지 않으면 로그아웃
       if (uid && !uid.startsWith('u_')) {
@@ -58,6 +62,28 @@ export default function App() {
         return;
       }
 
+      try {
+        const res = await fetch(`${BACKEND_URL}/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        if (res.status === 401 || res.status === 404) {
+          await clearAuthData();
+          setAppState('unauthenticated');
+          return;
+        }
+
+        if (res.ok) {
+          const me = await res.json() as MeResponse;
+          if (me.consent_flags.required !== true) {
+            setAppState('consent');
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn('[App] /v1/auth/me 조회 실패, 로컬 상태로 폴백합니다.', err);
+      }
+
       const diagDone = await getDiagnosisDone(uid);
       setAppState(diagDone ? 'authenticated' : 'diagnosis');
     } else {
@@ -67,8 +93,14 @@ export default function App() {
 
   async function handleLoginComplete(uid: string) {
     setUserId(uid);
-    const diagDone = await getDiagnosisDone(uid);
+    await bootstrapAuthenticatedUser(uid);
+  }
+
+  async function handleConsentComplete() {
+    if (!userId) return;
+    const diagDone = await getDiagnosisDone(userId);
     setAppState(diagDone ? 'authenticated' : 'diagnosis');
+    setActiveTab('home');
   }
 
   async function handleDiagnosisComplete() {
@@ -104,6 +136,15 @@ export default function App() {
       <>
         <StatusBar style="auto" />
         <LoginScreen onLoginComplete={handleLoginComplete} />
+      </>
+    );
+  }
+
+  if (appState === 'consent') {
+    return (
+      <>
+        <StatusBar style="auto" />
+        <ConsentScreen onConsentComplete={handleConsentComplete} />
       </>
     );
   }

@@ -19,22 +19,17 @@ import {
   View, Text, StyleSheet, TouchableOpacity, TextInput,
   ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
 } from 'react-native';
+import type {
+  DiagnosisResultResponse,
+  DiagnosisSubmitV2Request,
+} from '@japanese-learn/shared';
 import { getValidAppToken } from '../services/secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
 // ─── 타입 ──────────────────────────────────────────────────────
 
-interface DiagResult {
-  strategy_vector: {
-    recall_gap: number;
-    reading_weak: number;
-    form_weak: number;
-    load_sensitive: number;
-  };
-  weakness_flags: string[];
-  notes: string[];
-}
+type DiagResult = DiagnosisResultResponse;
 
 type DiagPhase =
   | 'intro'
@@ -264,7 +259,7 @@ export default function DiagnosisScreen({ onComplete, onSkip }: DiagnosisScreenP
     const recogCorrect   = recogAnswers.filter((a) => a.correct).length;
     const visualCorrect  = finalVisualAnswers.filter((a) => a.correct).length;
 
-    const payload = {
+    const payload: DiagnosisSubmitV2Request = {
       phase: 'cognitive_v2',
       self_assessment: selfAssessment,
       memory_pairs: {

@@ -11,6 +11,43 @@ import { pool } from '../db/pool';
 import { scheduleNext, createInitialCardState, CardState } from './sm2-scheduler';
 import { ReviewEvent } from '@japanese-learn/shared';
 
+type Queryable = {
+  query: PoolClient['query'];
+};
+
+export async function ensureAllCardStatesForUser(
+  userId: string,
+  db: Queryable = pool
+): Promise<number> {
+  const result = await db.query(
+    `
+    INSERT INTO card_state (
+      user_id, card_id, due_ts, interval_days, ease_factor, repetitions, stability, state
+    )
+    SELECT
+      $1,
+      c.card_id,
+      NOW(),
+      0,
+      2.5,
+      0,
+      0,
+      'new'
+    FROM cards c
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM card_state cs
+      WHERE cs.user_id = $1
+        AND cs.card_id = c.card_id
+    )
+    ON CONFLICT (user_id, card_id) DO NOTHING
+    `,
+    [userId]
+  );
+
+  return result.rowCount ?? 0;
+}
+
 /**
  * 오늘 복습할 카드 목록 조회
  *
@@ -42,7 +79,11 @@ export async function getTodayCards(
       i.surface,
       i.reading,
       i.meaning_ko,
-      i.item_id
+      i.item_id,
+      i.example_sentence_ja,
+      i.example_sentence_ko,
+      i.audio_ref,
+      c.prompt_payload
     FROM card_state cs
     JOIN cards c ON c.card_id = cs.card_id
     JOIN items i ON i.item_id = c.item_id
@@ -69,7 +110,11 @@ export async function getTodayCards(
       i.surface,
       i.reading,
       i.meaning_ko,
-      i.item_id
+      i.item_id,
+      i.example_sentence_ja,
+      i.example_sentence_ko,
+      i.audio_ref,
+      c.prompt_payload
     FROM card_state cs
     JOIN cards c ON c.card_id = cs.card_id
     JOIN items i ON i.item_id = c.item_id
@@ -280,16 +325,6 @@ export async function initCardStatesForUser(
 ): Promise<void> {
   if (cardIds.length === 0) return;
 
-  const values = cardIds
-    .map((_, i) => `($1, $${i * 2 + 2}, $${i * 2 + 3}, 'new')`)
-    .join(', ');
-
-  const params: unknown[] = [userId];
-  cardIds.forEach(() => {
-    params.push(/* card_id */ cardIds[params.length - 1 < cardIds.length ? params.length - 1 : 0]);
-    params.push(new Date());
-  });
-
   // 간단하게 개별 삽입 (배치 최적화는 P1)
   for (const cardId of cardIds) {
     const initial = createInitialCardState(userId, cardId);
@@ -328,4 +363,8 @@ export interface CardWithItem {
   reading: string | null;
   meaning_ko: string | null;
   item_id: string;
+  example_sentence_ja?: string | null;
+  example_sentence_ko?: string | null;
+  audio_ref?: string | null;
+  prompt_payload?: Record<string, unknown> | null;
 }

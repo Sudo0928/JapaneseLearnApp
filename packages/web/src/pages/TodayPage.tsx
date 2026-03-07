@@ -11,6 +11,16 @@ const PROMPT_LABEL: Record<string, string> = {
   LISTENING: '듣기',
 };
 
+function getMetadataTags(card: TodayCard): string[] {
+  const tags: string[] = [];
+
+  if (card.example_sentence_ja) tags.push('예문');
+  if (card.audio_ref) tags.push('오디오');
+  if (card.prompt_payload && Object.keys(card.prompt_payload).length > 0) tags.push('미래문항');
+
+  return tags;
+}
+
 export default function TodayPage() {
   const [reviewCards, setReviewCards] = useState<TodayCard[]>([]);
   const [newCards, setNewCards] = useState<TodayCard[]>([]);
@@ -47,15 +57,26 @@ export default function TodayPage() {
         </div>
       ) : (
         <div style={styles.cardGrid}>
-          {allCards.map((c) => (
-            <div key={c.card_id} style={styles.card}>
-              <div style={styles.cardSurface}>{c.surface}</div>
-              <div style={styles.cardReading}>{c.reading}</div>
-              <div style={styles.cardMeaning}>{c.meaning_ko}</div>
-              <div style={styles.cardTag}>{PROMPT_LABEL[c.prompt_type] ?? c.prompt_type}</div>
-              <div style={{ fontSize: 11, color: '#888' }}>{c.state === 'new' ? '신규' : '복습'}</div>
-            </div>
-          ))}
+          {allCards.map((c) => {
+            const metadataTags = getMetadataTags(c);
+
+            return (
+              <div key={c.card_id} style={styles.card}>
+                <div style={styles.cardSurface}>{c.surface}</div>
+                <div style={styles.cardReading}>{c.reading}</div>
+                <div style={styles.cardMeaning}>{c.meaning_ko}</div>
+                <div style={styles.cardTag}>{PROMPT_LABEL[c.prompt_type] ?? c.prompt_type}</div>
+                {metadataTags.length > 0 && (
+                  <div style={styles.metaRow}>
+                    {metadataTags.map((tag) => (
+                      <span key={`${c.card_id}-${tag}`} style={styles.metaTag}>{tag}</span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ fontSize: 11, color: '#888' }}>{c.state === 'new' ? '신규' : '복습'}</div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -65,14 +86,25 @@ export default function TodayPage() {
             혼동쌍 드릴 <span style={styles.badge}>{drills.length}건</span>
           </h3>
           <div style={styles.cardGrid}>
-            {drills.map((c) => (
-              <div key={`drill-${c.card_id}`} style={{ ...styles.card, borderLeft: '3px solid #F59E0B' }}>
-                <div style={styles.cardSurface}>{c.surface}</div>
-                <div style={styles.cardReading}>{c.reading}</div>
-                <div style={styles.cardMeaning}>{c.meaning_ko}</div>
-                <div style={{ ...styles.cardTag, color: '#F59E0B' }}>드릴</div>
-              </div>
-            ))}
+            {drills.map((c) => {
+              const metadataTags = getMetadataTags(c);
+
+              return (
+                <div key={`drill-${c.card_id}`} style={{ ...styles.card, borderLeft: '3px solid #F59E0B' }}>
+                  <div style={styles.cardSurface}>{c.surface}</div>
+                  <div style={styles.cardReading}>{c.reading}</div>
+                  <div style={styles.cardMeaning}>{c.meaning_ko}</div>
+                  <div style={{ ...styles.cardTag, color: '#F59E0B' }}>드릴</div>
+                  {metadataTags.length > 0 && (
+                    <div style={styles.metaRow}>
+                      {metadataTags.map((tag) => (
+                        <span key={`drill-${c.card_id}-${tag}`} style={styles.metaTag}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </>
       )}

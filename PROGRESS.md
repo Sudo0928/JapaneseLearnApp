@@ -18,21 +18,128 @@
 - **문서**: `docs/implementation-audit-and-dev-plan.md`
 - **핵심 결론(요약)**:
   - 모바일+백엔드는 MVP 핵심 축(계측·SRS·오프라인·OAuth·진단·플랜·리포트·실험)이 실제 구현돼 **완성도는 높음**
-  - 다만 제품화/운영 관점에서 아래 5개가 “제대로 만들어졌나”를 결정하는 **최상위 갭**
-    - **이벤트 단일성(One Event, One ID)**: 온라인 제출과 오프라인 큐가 동일 복습을 다른 `event_id`로 기록할 위험
-    - **인증 경계 잠금 미완**: `/v1/events`, `/v1/today`, `/v1/today/review`의 `requireAuth` 일관화 필요
-    - **오프라인 ingest → 스케줄(card_state) 재적용 미완**: append-only는 지키나 “서버 재계산”이 끝까지 연결되지 않음
-    - **데이터 삭제/철회(DSR) 미구현**: 동의 화면 문구 대비 API/UX 부재
-    - **웹 대시보드 계약 불일치**: web↔backend 요청/응답 shape mismatch 다수
+  - 2026-03-07 안정화 패치로 아래 항목은 코드 기준 완료로 본다.
+    - **One Event, One ID**
+    - **인증 경계 잠금**: `/v1/events`, `/v1/today`, `/v1/today/review`
+    - **데이터 삭제/철회(DSR)**: `DELETE /v1/auth/me`
+    - **consent bootstrap**: `/v1/auth/me` 기반 우선 확인
+    - **웹/모바일/백엔드 shared contract 강화**
+  - 현재 남은 갭은 운영 surface와 콘텐츠 확장 쪽에 집중된다.
+    - 관리자용 대시보드 분리
+    - deprecated 진단 v1 제거
+    - `MCQ/CLOZE/LISTENING`용 콘텐츠 메타데이터 채우기
+    - 데이터 export API
 
-### 다음 작업(권장 우선순위: P0)
+### 다음 작업(권장 우선순위: P2)
 
-- **P0-1** 이벤트 단일성 통합(온라인/오프라인 동일 `event_id`)
-- **P0-2** 인증 경계 통일(`requireAuth`, userId 단일 소스)
-- **P0-3** 데이터 삭제/철회 API + 모바일 진입점
-- **P0-4** `/v1/events` ingest 후 스케줄 재적용(replay) 최소 구현
+- **P2-1** 데이터 export API
+- **P2-2** 운영 정책/보관 규칙 정리
 
 > 실행 가능한 작업 단위로 쪼갠 백로그는 `docs/backlog.csv` 참고.
+
+### 2026-03-07 세션 10 — 안정화 패치 완료
+
+- **공용 계약 정리**
+  - `packages/shared`에 `ReviewEventInput`, `DiagnosisSubmitV2Request`, `DiagnosisResultResponse`, admin contracts 추가
+  - `session-policy.ts` 추가로 라이브 prompt/힌트/chunk 정책을 공용 헬퍼로 분리
+- **모바일 경계 잠금**
+  - `App.tsx`에서 `GET /v1/auth/me` 기반 consent bootstrap 적용
+  - `LoginScreen`의 신규 사용자 전용 consent 분기 제거
+  - `ReportScreen`에서 `/v1/report/batch` 호출 제거
+  - `SessionScreen`에서 `hint_steps`, `session_chunk_min`, `mini_handwriting`, reserved example policy 반영
+- **웹 경계 잠금**
+  - `ExperimentsPage`에서 A/A 검증 제거
+  - `admin-api.ts`로 admin client 분리
+- **저장소 정리**
+  - `packages/web/src/*.js`, `packages/shared/src/*.js|.d.ts|.map`, `packages/backend/migrations/*.js|.map` 제거
+  - `packages/web/tsconfig.json`에 `noEmit` 적용
+  - 루트 `check:generated` 스크립트 추가
+- **콘텐츠 확장 준비**
+  - `011_content_metadata.sql` 추가
+- **검증**
+  - `npm run build --workspace=packages/shared`
+  - `npm test --workspace=packages/backend`
+  - `npx tsc --noEmit` (`packages/mobile`)
+  - `npm run build --workspace=packages/web`
+
+### 2026-03-07 세션 11 — 운영 surface 분리 + 진단 v1 제거
+
+- **진단 v1 제거**
+  - `packages/backend/src/routes/diagnosis.ts`에서 `/v1/diagnosis/items`, `/v1/diagnosis/submit` 제거
+  - 공개 진단 계약은 `GET /v1/diagnosis/result`, `POST /v1/diagnosis/submit-v2`만 유지
+- **운영 콘솔 분리**
+  - 웹에 `/admin/operations` 라우트 추가
+  - `AdminLayout.tsx`, `AdminOperationsPage.tsx`, `admin-api.ts`로 운영용 A/A 검증 및 리포트 배치 실행 화면 분리
+  - 사용자 대시보드 네비게이션에는 admin surface를 노출하지 않음
+- **다음 작업**
+  - 콘텐츠 메타데이터 실제 채우기
+  - `MCQ/CLOZE/LISTENING` 활성화
+  - 데이터 export API
+
+### 2026-03-07 세션 12 — 콘텐츠 메타데이터 backfill 완료
+
+- **Today 계약 확장**
+  - `packages/shared/src/types/api-contracts.ts`의 `TodayCard`에 `example_sentence_ja`, `example_sentence_ko`, `audio_ref`, `prompt_payload` 추가
+  - 모바일 `today-api.ts`가 shared `TodayCard`를 그대로 사용하도록 수렴
+- **Today/Drill 조회 확장**
+  - `card-state-service.ts`, `confusion-drill-service.ts`가 예문/오디오/payload를 함께 조회
+  - 세션의 live prompt 제한(`SURFACE_TO_MEANING`, `SURFACE_TO_READING`, `MEANING_TO_SURFACE`)은 그대로 유지
+- **콘텐츠 seed/backfill**
+  - `012_seed_content_metadata.sql` 추가
+  - 샘플 아이템 10종에 예문, 오디오 참조, future prompt용 `prompt_payload` 채움
+  - 새 `MCQ/CLOZE/LISTENING` 카드는 생성하지 않음
+- **대시보드 확인성 보강**
+  - `TodayPage.tsx`에서 예문/오디오/미래문항 메타데이터 뱃지 표시
+- **다음 작업**
+  - 관리자용 운영 콘솔 인증 UX 개선
+  - 데이터 export API
+
+### 2026-03-07 세션 13 — 확장 prompt 활성화 완료
+
+- **신규 prompt 카드 활성화**
+  - `013_extended_prompt_cards.sql` 추가
+  - 준비된 샘플 아이템에 `MCQ`, `CLOZE`, `LISTENING` 카드 생성
+- **기존 사용자 bootstrap 보강**
+  - `ensureAllCardStatesForUser()` 추가
+  - 신규/기존 사용자 모두 `today` 진입 시 누락된 `card_state`를 자동 보충
+- **세션 렌더러 확장**
+  - `SessionScreen.tsx`가 입력형 3종 + `MCQ` + `CLOZE` + `LISTENING`를 모두 처리
+  - `LISTENING`은 `expo-speech` 기반 TTS 재생으로 실제 청취 프롬프트 제공
+  - `PlanScreen.tsx`에 `CLOZE`, `LISTENING` mix 비율 노출
+- **공용 정책/테스트 갱신**
+  - `session-policy.ts`가 prompt별 readiness를 검사해 준비된 카드만 세션에 투입
+  - backend 테스트에 새 prompt mix / readiness 케이스 추가
+- **다음 작업**
+  - 관리자용 운영 콘솔 인증 UX 개선
+  - 데이터 export API
+
+### 2026-03-07 세션 14 — 웹 번들 최적화 완료
+
+- **라우트 레벨 분리**
+  - `packages/web/src/main.tsx`에서 `TodayPage`, `ReportPage`, `ExperimentsPage`, `AdminOperationsPage`를 `React.lazy`로 분리
+  - `Suspense` fallback 추가로 페이지 전환 시 지연 로딩 처리
+- **Vite chunk 분리**
+  - `packages/web/vite.config.ts`에 `manualChunks` 추가
+  - `router`, `charts(recharts+d3)`, `vendor`를 분리해 대형 초기 번들 제거
+- **결과**
+  - 기존 단일 500kB+ chunk 경고 제거
+  - 현재 빌드 산출물은 대략 `vendor 233kB`, `charts 299kB` 수준으로 분리
+- **다음 작업**
+  - 관리자용 운영 콘솔 인증 UX 개선
+  - 데이터 export API
+
+### 2026-03-07 Session 15 — Admin console auth UX complete
+
+- **Completed**
+  - rewrote `packages/web/src/services/admin-api.ts` to store admin keys with `savedAt` and `lastUsedAt`
+  - rewrote `packages/web/src/pages/AdminOperationsPage.tsx` to require a saved key, show masked key state, and keep a recent activity log
+  - expanded `packages/web/src/styles.ts` with admin status cards, success banners, warnings, and activity log styles
+- **Verification**
+  - `npm run build --workspace=packages/web`
+  - `npm run check:generated`
+- **Next work**
+  - data export API
+  - retention policy / operations docs
 
 ## 기술 스택 결정
 

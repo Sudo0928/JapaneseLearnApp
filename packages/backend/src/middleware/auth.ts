@@ -14,7 +14,35 @@ import jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
 import crypto from 'crypto';
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const googleClient = new OAuth2Client();
+
+function collectGoogleClientIds(): string[] {
+  const rawValues = [
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_IDS,
+    process.env.GOOGLE_CLIENT_ID_WEB,
+    process.env.GOOGLE_CLIENT_ID_ANDROID,
+    process.env.GOOGLE_CLIENT_ID_IOS,
+    process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB,
+    process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID,
+    process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS,
+  ];
+
+  const values = rawValues
+    .flatMap((value) => (value ?? '').split(','))
+    .map((value) => value.trim())
+    .filter((value) => value.endsWith('.apps.googleusercontent.com'));
+
+  return [...new Set(values)];
+}
+
+export function getGoogleClientIds(): string[] {
+  return collectGoogleClientIds();
+}
+
+export function hasGoogleOAuthConfig(): boolean {
+  return getGoogleClientIds().length > 0;
+}
 
 // ─── 타입 확장 ──────────────────────────────────────────────
 declare global {
@@ -133,9 +161,14 @@ export async function verifyGoogleIdToken(idToken: string): Promise<{
   sub: string;
   emailHash: string;
 }> {
+  const audiences = getGoogleClientIds();
+  if (audiences.length === 0) {
+    throw new Error('Google OAuth client IDs are not configured.');
+  }
+
   const ticket = await googleClient.verifyIdToken({
     idToken,
-    audience: process.env.GOOGLE_CLIENT_ID,
+    audience: audiences,
   });
 
   const payload = ticket.getPayload();

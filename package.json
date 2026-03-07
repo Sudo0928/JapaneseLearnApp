@@ -14,6 +14,7 @@
     "web": "npm run web --workspace=packages/mobile",
     "dashboard": "npm run dev --workspace=packages/web",
     "build:shared": "npm run build --workspace=packages/shared",
+    "check:generated": "node scripts/check-generated-artifacts.js",
     "test": "npm run test --workspaces --if-present"
   },
   "engines": {

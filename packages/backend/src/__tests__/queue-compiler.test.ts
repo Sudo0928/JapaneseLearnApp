@@ -65,4 +65,27 @@ describe('queue compiler', () => {
 
     expect(selected).toHaveLength(2);
   });
+
+  it('new prompt cards are selected when the mix weights them and they exist', () => {
+    const cards = [
+      makeCard('mcq1', 'MCQ'),
+      makeCard('mcq2', 'MCQ'),
+      makeCard('cloze1', 'CLOZE'),
+      makeCard('listening1', 'LISTENING'),
+      makeCard('stm1', 'SURFACE_TO_MEANING'),
+    ];
+
+    const selected = selectCardsByMix(cards, {
+      SURFACE_TO_MEANING: 0.1,
+      MEANING_TO_SURFACE: 0,
+      SURFACE_TO_READING: 0,
+      MCQ: 0.4,
+      CLOZE: 0.3,
+      LISTENING: 0.2,
+    }, 4);
+
+    expect(selected.map((card) => card.prompt_type)).toEqual(
+      expect.arrayContaining(['MCQ', 'CLOZE', 'LISTENING'])
+    );
+  });
 });
