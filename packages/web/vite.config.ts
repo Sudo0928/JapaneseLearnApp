@@ -28,7 +28,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@japanese-learn/shared': path.resolve(__dirname, '../shared/dist'),
+      '@japanese-learn/shared': path.resolve(__dirname, '../shared/src'),
     },
   },
 });

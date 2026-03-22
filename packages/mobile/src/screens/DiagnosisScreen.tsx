@@ -1,866 +1,905 @@
-/**
- * DiagnosisScreen — 학습 방식 진단 (인지심리학 기반)
- *
- * report.mdc 원칙:
- *  - 진단 목적: 레벨테스트 X, 전략 프로파일(strategy_vector) 초기값 산출
- *  - 측정 축: recall_gap, form_weak, load_sensitive (행동 기반)
- *  - 일본어 단어 X → 중립적 기호·숫자로 측정
- *
- * 4단계 구성 (총 약 6~8분):
- *  Phase 1: 자기평가    (목표·시간·약점 선택)
- *  Phase 2: 기억쌍 테스트 (기호-의미 학습 → 인출 vs 재인)  → recall_gap
- *  Phase 3: 역순 기억   (작업기억 스팬 테스트)              → load_sensitive
- *  Phase 4: 시각 변별   (유사 형태 구별)                   → form_weak
- *  Result:  전략 벡터 시각화
- */
-
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, TextInput,
-  ScrollView, KeyboardAvoidingView, Platform, Alert, ActivityIndicator,
+  ActivityIndicator,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import type {
+  DiagnosisBootstrapResponse,
+  DiagnosisCognitiveMetrics,
+  DiagnosisEvaluateBlockRequest,
+  DiagnosisEvaluateBlockResponse,
+  DiagnosisLanguageMicroAnswer,
+  DiagnosisLanguageMicroItem,
+  DiagnosisPromptType,
   DiagnosisResultResponse,
-  DiagnosisSubmitV2Request,
+  DiagnosisSubmitV4Request,
+  OnboardingProfile,
+  SupportedLocale,
 } from '@japanese-learn/shared';
+import { getDiagnosisUiCopy } from '../i18n/diagnosis-ui';
+import {
+  toCanonicalMeaningValue,
+  translateAdaptiveReason,
+  translateKnownNarrative,
+  translateMeaningValue,
+} from '../i18n/diagnosis-plan';
+import { useSettings } from '../providers/settings-provider';
+import { fetchWithTimeout } from '../services/network';
 import { getValidAppToken } from '../services/secure-storage';
+import type { ThemeColors } from '../theme';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
-// ─── 타입 ──────────────────────────────────────────────────────
+type Phase = 'intro' | 'onboarding' | 'memory_study' | 'memory_recall' | 'memory_recognition' | 'digit_span' | 'visual' | 'language' | 'result';
+type DigitSpanMode = 'forward' | 'reverse' | 'ascending' | 'odd_only';
+type DigitSpanTrial = {
+  digits: number[];
+  mode: DigitSpanMode;
+  expected: string;
+};
+type MemoryMeaning = Record<SupportedLocale, string>;
+type MemoryPairSeed = {
+  id: string;
+  symbol: string;
+  meaning: MemoryMeaning;
+  decoys: MemoryMeaning[];
+};
+type VisualTrial = {
+  options: string[];
+  answer: number;
+};
 
-type DiagResult = DiagnosisResultResponse;
-
-type DiagPhase =
-  | 'intro'
-  | 'self_assessment'
-  | 'memory_study'
-  | 'memory_recall'
-  | 'memory_recognition'
-  | 'digit_span'
-  | 'visual_discrimination'
-  | 'result'
-  | 'error';
-
-interface SelfAssessmentData {
-  target_level: string;
-  daily_minutes: number;
-  weak_areas: string[];
-}
-
-interface MemoryAnswer {
-  pair_id: string;
-  type: 'recall' | 'recognition';
-  correct: boolean;
-  rt_ms: number;
-}
-
-// ─── 기호-의미 쌍 (일본어 없음, 중립 기호) ─────────────────────
-
-const SYMBOL_PAIRS = [
-  { id: 'p1', symbol: '🌙', meaning: '잔잔함', decoys: ['격렬함', '차가움', '빠름'] },
-  { id: 'p2', symbol: '🔥', meaning: '격렬함', decoys: ['잔잔함', '흐름', '부드러움'] },
-  { id: 'p3', symbol: '❄️', meaning: '차가움', decoys: ['빠름', '잔잔함', '격렬함'] },
-  { id: 'p4', symbol: '⚡', meaning: '빠름',   decoys: ['차가움', '흐름', '잔잔함'] },
-  { id: 'p5', symbol: '🌊', meaning: '흐름',   decoys: ['빠름', '부드러움', '격렬함'] },
-  { id: 'p6', symbol: '🍃', meaning: '부드러움', decoys: ['차가움', '격렬함', '흐름'] },
+const MEMORY_SYMBOL_POOL = [
+  'KA', 'MI', 'RA', 'ZU', 'NO', 'TE', 'SHI', 'YU', 'KO', 'NE',
+  'TA', 'FU', 'RE', 'SO', 'HI', 'ME', 'NA', 'RU', 'SE', 'YO',
+  'GI', 'MO', 'KE', 'TO', 'WA', 'SA', 'CHI', 'NI', 'HO', 'MA',
 ];
-
-// 회상 테스트용 3개 / 재인 테스트용 3개로 분리
-const RECALL_PAIRS       = SYMBOL_PAIRS.slice(0, 3);
-const RECOGNITION_PAIRS  = SYMBOL_PAIRS.slice(3, 6);
-
-// ─── 숫자 역순 테스트 ──────────────────────────────────────────
-
-const DIGIT_SEQUENCES = [
-  { id: 'd4a', digits: [3, 7, 1, 9],       reverse: '9173' },
-  { id: 'd5a', digits: [5, 2, 8, 4, 1],    reverse: '14825' },
-  { id: 'd5b', digits: [6, 3, 9, 2, 7],    reverse: '72936' },
-  { id: 'd6a', digits: [4, 8, 1, 5, 3, 7], reverse: '735184' },
+const MEMORY_MEANING_POOL: MemoryMeaning[] = [
+  { ko: '바람', en: 'wind', ja: '風' },
+  { ko: '약속', en: 'promise', ja: '約束' },
+  { ko: '친구', en: 'friend', ja: '友達' },
+  { ko: '기차', en: 'train', ja: '電車' },
+  { ko: '물', en: 'water', ja: '水' },
+  { ko: '책', en: 'book', ja: '本' },
+  { ko: '티켓', en: 'ticket', ja: '切符' },
+  { ko: '다리', en: 'bridge', ja: '橋' },
+  { ko: '거울', en: 'mirror', ja: '鏡' },
+  { ko: '정원', en: 'garden', ja: '庭' },
+  { ko: '등불', en: 'lantern', ja: '灯り' },
+  { ko: '역', en: 'station', ja: '駅' },
+  { ko: '실', en: 'thread', ja: '糸' },
+  { ko: '카메라', en: 'camera', ja: 'カメラ' },
+  { ko: '신호', en: 'signal', ja: '信号' },
+  { ko: '피아노', en: 'piano', ja: 'ピアノ' },
+  { ko: '항구', en: 'harbor', ja: '港' },
+  { ko: '커피', en: 'coffee', ja: 'コーヒー' },
+  { ko: '그림자', en: 'shadow', ja: '影' },
+  { ko: '행성', en: 'planet', ja: '惑星' },
+  { ko: '시장', en: 'market', ja: '市場' },
+  { ko: '창문', en: 'window', ja: '窓' },
+  { ko: '계곡', en: 'valley', ja: '谷' },
+  { ko: '강', en: 'river', ja: '川' },
+  { ko: '깃털', en: 'feather', ja: '羽' },
+  { ko: '일정', en: 'schedule', ja: '予定' },
+  { ko: '엔진', en: 'engine', ja: 'エンジン' },
+  { ko: '숲', en: 'forest', ja: '森' },
+  { ko: '편지', en: 'letter', ja: '手紙' },
+  { ko: '선반', en: 'shelf', ja: '棚' },
 ];
-
-// ─── 시각 변별 (4지선다 중 다른 1개 찾기) ───────────────────────
-
-const VISUAL_TRIALS = [
-  {
-    id: 'v1', prompt: '다른 하나는?',
-    options: ['ㅇ', 'ㅇ', 'ㅁ', 'ㅇ'], answer: 2,
-  },
-  {
-    id: 'v2', prompt: '다른 하나는?',
-    options: ['△', '▲', '△', '△'], answer: 1,
-  },
-  {
-    id: 'v3', prompt: '다른 하나는?',
-    options: ['ㅎ', 'ㅎ', 'ㅎ', 'ㅓ'], answer: 3,
-  },
-  {
-    id: 'v4', prompt: '다른 하나는?',
-    options: ['水', '水', '氷', '水'], answer: 2,
-  },
+const DIGIT_TRIAL_MODES: DigitSpanMode[] = ['forward', 'reverse', 'ascending', 'odd_only'];
+const DIGIT_TRIAL_LENGTHS = [4, 5, 6];
+const VISUAL_CHAR_POOL = ['A', 'H', 'K', 'M', 'N', 'P', 'R', 'T', 'V', 'W', 'X', 'Y', '7', '8', '0', '1'];
+const DEFAULT_ONBOARDING: OnboardingProfile = {
+  target_level: 'JLPT_N5',
+  target_date: null,
+  focus: [],
+  daily_minutes: 20,
+  weekly_variability: 'medium',
+  offline_expected: false,
+  kanji_background: 'none',
+  notifications_opt_in: false,
+  weak_areas: [],
+};
+const TARGET_LEVEL_OPTIONS = ['JLPT_N5', 'JLPT_N4', 'JLPT_N3', 'JLPT_N2', 'JLPT_N1'] as const;
+const DIAGNOSIS_PROMPT_TYPES: DiagnosisPromptType[] = [
+  'SURFACE_TO_MEANING',
+  'SURFACE_TO_READING',
+  'MEANING_TO_SURFACE',
+  'MCQ',
 ];
-
-// ─── 메인 컴포넌트 ─────────────────────────────────────────────
-
 interface DiagnosisScreenProps {
-  onComplete: (result?: DiagResult) => void;
+  onComplete: (result?: DiagnosisResultResponse) => void;
   onSkip: () => void;
 }
 
 export default function DiagnosisScreen({ onComplete, onSkip }: DiagnosisScreenProps) {
-  const [phase, setPhase]   = useState<DiagPhase>('intro');
-  const [loading, setLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState('');
-  const [result, setResult] = useState<DiagResult | null>(null);
-
-  // Phase 1: 자기평가
-  const [selfAssessment, setSelfAssessment] = useState<SelfAssessmentData>({
-    target_level: '',
-    daily_minutes: 0,
-    weak_areas: [],
-  });
-
-  // Phase 2: 기억쌍
+  const { colors, preferences } = useSettings();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const copy = useMemo(() => getDiagnosisUiCopy(preferences.locale), [preferences.locale]);
+  const [phase, setPhase] = useState<Phase>('intro');
+  const [bootstrap, setBootstrap] = useState<DiagnosisBootstrapResponse | null>(null);
+  const [loadingBootstrap, setLoadingBootstrap] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [result, setResult] = useState<DiagnosisResultResponse | null>(null);
+  const [onboarding, setOnboarding] = useState<OnboardingProfile>(DEFAULT_ONBOARDING);
+  const [queue, setQueue] = useState<DiagnosisLanguageMicroItem[]>([]);
+  const [adaptiveReasons, setAdaptiveReasons] = useState<string[]>([]);
+  const [confidencePreview, setConfidencePreview] = useState<DiagnosisEvaluateBlockResponse['confidence_by_axis'] | null>(null);
   const [studyTimerLeft, setStudyTimerLeft] = useState(20);
-  const studyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [memoryAnswers, setMemoryAnswers]   = useState<MemoryAnswer[]>([]);
-  const [currentPairIdx, setCurrentPairIdx] = useState(0);
-  const [recallInput, setRecallInput]       = useState('');
-  const [pairStartTime, setPairStartTime]   = useState(Date.now());
-
-  // Phase 3: 역순 기억
-  const [digitIdx, setDigitIdx]       = useState(0);
-  const [showDigits, setShowDigits]   = useState(true);
-  const [digitInput, setDigitInput]   = useState('');
-  const [digitStartTime, setDigitStartTime] = useState(Date.now());
+  const [currentRecallIndex, setCurrentRecallIndex] = useState(0);
+  const [recallInput, setRecallInput] = useState('');
+  const [pairStartTime, setPairStartTime] = useState(Date.now());
+  const [memoryAnswers, setMemoryAnswers] = useState<Array<{ type: 'recall' | 'recognition'; correct: boolean; rt_ms: number }>>([]);
+  const [digitIndex, setDigitIndex] = useState(0);
+  const [showDigits, setShowDigits] = useState(true);
+  const [digitInput, setDigitInput] = useState('');
   const [digitSpanMax, setDigitSpanMax] = useState(3);
-  const [digitAnswers, setDigitAnswers] = useState<{ id: string; correct: boolean }[]>([]);
-  const digitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Phase 4: 시각 변별
-  const [visualIdx, setVisualIdx]     = useState(0);
+  const [visualIndex, setVisualIndex] = useState(0);
   const [visualStartTime, setVisualStartTime] = useState(Date.now());
-  const [visualAnswers, setVisualAnswers] = useState<{ id: string; correct: boolean; rt_ms: number }[]>([]);
+  const [visualAnswers, setVisualAnswers] = useState<Array<{ correct: boolean; rt_ms: number }>>([]);
+  const [languageIndex, setLanguageIndex] = useState(0);
+  const [languageInput, setLanguageInput] = useState('');
+  const [languageAnswers, setLanguageAnswers] = useState<DiagnosisLanguageMicroAnswer[]>([]);
+  const languageSubmitLock = useRef(false);
+  const studyTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const digitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const languageStartTime = useRef(Date.now());
+  const memoryDeck = useMemo(() => buildMemoryPairSeeds(), []);
+  const digitDeck = useMemo(() => buildDigitTrials(), []);
+  const visualDeck = useMemo(() => buildVisualTrials(), []);
+  const question = queue[languageIndex];
+  const memoryPairs = useMemo(
+    () => memoryDeck.map((pair) => ({
+      ...pair,
+      meaning: pair.meaning[preferences.locale],
+      decoys: pair.decoys.map((choice) => choice[preferences.locale]),
+    })),
+    [memoryDeck, preferences.locale],
+  );
+  const recallPairs = useMemo(() => memoryPairs.slice(0, 3), [memoryPairs]);
+  const recognitionPairs = useMemo(() => memoryPairs.slice(3, 6), [memoryPairs]);
 
-  // ── Study 타이머 시작 ────────────────────────────────────────
+  useEffect(() => {
+    void loadBootstrap();
+    return () => {
+      if (studyTimerRef.current) clearInterval(studyTimerRef.current);
+      if (digitTimerRef.current) clearTimeout(digitTimerRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     if (phase !== 'memory_study') return;
     setStudyTimerLeft(20);
     studyTimerRef.current = setInterval(() => {
-      setStudyTimerLeft((t) => {
-        if (t <= 1) {
+      setStudyTimerLeft((prev) => {
+        if (prev <= 1) {
           if (studyTimerRef.current) clearInterval(studyTimerRef.current);
-          setCurrentPairIdx(0);
+          setCurrentRecallIndex(0);
           setPairStartTime(Date.now());
           setPhase('memory_recall');
           return 0;
         }
-        return t - 1;
+        return prev - 1;
       });
     }, 1000);
-    return () => { if (studyTimerRef.current) clearInterval(studyTimerRef.current); };
+    return () => {
+      if (studyTimerRef.current) clearInterval(studyTimerRef.current);
+    };
   }, [phase]);
 
-  // ── 숫자 표시 타이머 ────────────────────────────────────────
   useEffect(() => {
     if (phase !== 'digit_span') return;
     setShowDigits(true);
     setDigitInput('');
-    digitTimerRef.current = setTimeout(() => {
-      setShowDigits(false);
-      setDigitStartTime(Date.now());
-    }, 2500);
-    return () => { if (digitTimerRef.current) clearTimeout(digitTimerRef.current); };
-  }, [phase, digitIdx]);
-
-  // ── 시각 변별 시작 시간 ──────────────────────────────────────
-  useEffect(() => {
-    if (phase === 'visual_discrimination') setVisualStartTime(Date.now());
-  }, [phase, visualIdx]);
-
-  // ── 회상 답변 처리 ───────────────────────────────────────────
-  const handleRecallAnswer = useCallback(() => {
-    const pair = RECALL_PAIRS[currentPairIdx];
-    const rt   = Date.now() - pairStartTime;
-    const correct = recallInput.trim() === pair.meaning;
-
-    setMemoryAnswers((prev) => [...prev, { pair_id: pair.id, type: 'recall', correct, rt_ms: rt }]);
-    setRecallInput('');
-
-    if (currentPairIdx + 1 < RECALL_PAIRS.length) {
-      setCurrentPairIdx((i) => i + 1);
-      setPairStartTime(Date.now());
-    } else {
-      setCurrentPairIdx(0);
-      setPairStartTime(Date.now());
-      setPhase('memory_recognition');
-    }
-  }, [currentPairIdx, pairStartTime, recallInput]);
-
-  // ── 재인 답변 처리 ───────────────────────────────────────────
-  const handleRecognitionAnswer = useCallback((chosen: string) => {
-    const pair = RECOGNITION_PAIRS[currentPairIdx];
-    const rt   = Date.now() - pairStartTime;
-    const correct = chosen === pair.meaning;
-
-    setMemoryAnswers((prev) => [...prev, { pair_id: pair.id, type: 'recognition', correct, rt_ms: rt }]);
-
-    if (currentPairIdx + 1 < RECOGNITION_PAIRS.length) {
-      setCurrentPairIdx((i) => i + 1);
-      setPairStartTime(Date.now());
-    } else {
-      setDigitIdx(0);
-      setPhase('digit_span');
-    }
-  }, [currentPairIdx, pairStartTime]);
-
-  // ── 역순 숫자 답변 처리 ─────────────────────────────────────
-  const handleDigitAnswer = useCallback(() => {
-    const seq = DIGIT_SEQUENCES[digitIdx];
-    const correct = digitInput.trim() === seq.reverse;
-    const newAnswers = [...digitAnswers, { id: seq.id, correct }];
-    setDigitAnswers(newAnswers);
-
-    if (correct) setDigitSpanMax(seq.digits.length);
-
-    if (digitIdx + 1 < DIGIT_SEQUENCES.length) {
-      setDigitIdx((i) => i + 1);
-    } else {
-      setVisualIdx(0);
-      setPhase('visual_discrimination');
-    }
-  }, [digitIdx, digitInput, digitAnswers]);
-
-  // ── 시각 변별 처리 ──────────────────────────────────────────
-  const handleVisualAnswer = useCallback((chosen: number) => {
-    const trial = VISUAL_TRIALS[visualIdx];
-    const rt    = Date.now() - visualStartTime;
-    const correct = chosen === trial.answer;
-    const newAnswers = [...visualAnswers, { id: trial.id, correct, rt_ms: rt }];
-    setVisualAnswers(newAnswers);
-
-    if (visualIdx + 1 < VISUAL_TRIALS.length) {
-      setVisualIdx((i) => i + 1);
-    } else {
-      submitCognitiveDiagnosis(newAnswers);
-    }
-  }, [visualIdx, visualStartTime, visualAnswers, memoryAnswers, selfAssessment, digitSpanMax]);
-
-  // ── 최종 제출 ───────────────────────────────────────────────
-  async function submitCognitiveDiagnosis(
-    finalVisualAnswers: { id: string; correct: boolean; rt_ms: number }[],
-  ) {
-    setLoading(true);
-    setPhase('result');
-
-    const recallAnswers  = memoryAnswers.filter((a) => a.type === 'recall');
-    const recogAnswers   = memoryAnswers.filter((a) => a.type === 'recognition');
-    const recallCorrect  = recallAnswers.filter((a) => a.correct).length;
-    const recogCorrect   = recogAnswers.filter((a) => a.correct).length;
-    const visualCorrect  = finalVisualAnswers.filter((a) => a.correct).length;
-
-    const payload: DiagnosisSubmitV2Request = {
-      phase: 'cognitive_v2',
-      self_assessment: selfAssessment,
-      memory_pairs: {
-        recall_correct:      recallCorrect,
-        recall_total:        RECALL_PAIRS.length,
-        recognition_correct: recogCorrect,
-        recognition_total:   RECOGNITION_PAIRS.length,
-        avg_rt_ms: memoryAnswers.length
-          ? Math.round(memoryAnswers.reduce((s, a) => s + a.rt_ms, 0) / memoryAnswers.length)
-          : 3000,
-      },
-      digit_span:       { max_correct_span: digitSpanMax },
-      visual_discrimination: {
-        correct: visualCorrect,
-        total:   VISUAL_TRIALS.length,
-        avg_rt_ms: finalVisualAnswers.length
-          ? Math.round(finalVisualAnswers.reduce((s, a) => s + a.rt_ms, 0) / finalVisualAnswers.length)
-          : 3000,
-      },
+    digitTimerRef.current = setTimeout(() => setShowDigits(false), 2200);
+    return () => {
+      if (digitTimerRef.current) clearTimeout(digitTimerRef.current);
     };
+  }, [phase, digitIndex]);
 
+  useEffect(() => {
+    if (phase === 'visual') setVisualStartTime(Date.now());
+    if (phase === 'language') {
+      languageStartTime.current = Date.now();
+      setLanguageInput('');
+    }
+  }, [phase, visualIndex, languageIndex]);
+
+  async function loadBootstrap() {
+    setLoadingBootstrap(true);
     try {
       const token = await getValidAppToken();
-      const res = await fetch(`${BACKEND_URL}/v1/diagnosis/submit-v2`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify(payload),
+      const response = await fetchWithTimeout(`${BACKEND_URL}/v1/diagnosis/bootstrap`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
-
-      if (res.ok) {
-        const data = await res.json() as DiagResult;
-        setResult(data);
-      } else {
-        setResult(buildFallbackResult(recallCorrect, recogCorrect, digitalSpanToSensitivity(digitSpanMax), visualCorrect));
-      }
-    } catch {
-      setResult(buildFallbackResult(recallCorrect, recogCorrect, digitalSpanToSensitivity(digitSpanMax), visualCorrect));
+      if (!response.ok) return;
+      const data = await response.json() as DiagnosisBootstrapResponse;
+      setBootstrap(data);
+      setOnboarding(data.onboarding_defaults ?? DEFAULT_ONBOARDING);
+      setQueue(buildDiagnosisQueue(data.core_items ?? []));
+      if (data.previous_result) setResult(data.previous_result);
     } finally {
-      setLoading(false);
+      setLoadingBootstrap(false);
     }
   }
 
-  function digitalSpanToSensitivity(span: number): number {
-    if (span >= 6) return 0.1;
-    if (span >= 5) return 0.35;
-    if (span >= 4) return 0.55;
-    return 0.75;
-  }
-
-  function buildFallbackResult(
-    recallCorrect: number, recogCorrect: number,
-    loadSens: number, visualCorrect: number,
-  ): DiagResult {
-    const recallRate  = recallCorrect / RECALL_PAIRS.length;
-    const recogRate   = recogCorrect / RECOGNITION_PAIRS.length;
-    const recall_gap  = Math.max(0, recogRate - recallRate);
-    const form_weak   = 1 - visualCorrect / VISUAL_TRIALS.length;
-    const reading_weak = selfAssessment.weak_areas.includes('reading') ? 0.7 : 0.3;
+  function buildCognitiveMetrics(): DiagnosisCognitiveMetrics {
+    const recallAnswers = memoryAnswers.filter((answer) => answer.type === 'recall');
+    const recognitionAnswers = memoryAnswers.filter((answer) => answer.type === 'recognition');
+    const memoryAvgRt = memoryAnswers.length
+      ? Math.round(memoryAnswers.reduce((sum, answer) => sum + answer.rt_ms, 0) / memoryAnswers.length)
+      : 2500;
+    const visualCorrect = visualAnswers.filter((answer) => answer.correct).length;
+    const visualAvgRt = visualAnswers.length
+      ? Math.round(visualAnswers.reduce((sum, answer) => sum + answer.rt_ms, 0) / visualAnswers.length)
+      : 2500;
 
     return {
-      strategy_vector: { recall_gap, reading_weak, form_weak, load_sensitive: loadSens },
-      weakness_flags: [
-        ...(recall_gap >= 0.4 ? ['recall_weak'] : []),
-        ...(reading_weak >= 0.6 ? ['reading_weak'] : []),
-        ...(form_weak >= 0.5 ? ['form_weak'] : []),
-        ...(loadSens >= 0.6 ? ['load_sensitive'] : []),
-      ],
-      notes: [],
+      memory_pairs: {
+        recall_correct: recallAnswers.filter((answer) => answer.correct).length,
+        recall_total: recallPairs.length,
+        recognition_correct: recognitionAnswers.filter((answer) => answer.correct).length,
+        recognition_total: recognitionPairs.length,
+        avg_rt_ms: memoryAvgRt,
+      },
+      digit_span: { max_correct_span: digitSpanMax },
+      visual_discrimination: {
+        correct: visualCorrect,
+        total: visualDeck.length,
+        avg_rt_ms: visualAvgRt,
+      },
     };
   }
 
-  // ── 스킵 ────────────────────────────────────────────────────
-  function handleSkip() {
-    Alert.alert(
-      '진단 건너뛰기',
-      '진단 없이 시작하면 기본 플랜이 적용됩니다. 나중에 홈에서 다시 받을 수 있어요.',
-      [
-        { text: '계속 진단', style: 'cancel' },
-        { text: '건너뛰기', onPress: () => onSkip() },
-      ],
-    );
+  function toggleFocus(focus: string) {
+    setOnboarding((prev) => {
+      const current = new Set(prev.focus ?? []);
+      if (current.has(focus)) current.delete(focus);
+      else current.add(focus);
+      return { ...prev, focus: [...current] };
+    });
   }
 
-  // ─────────────────── 렌더링 ─────────────────────────────────
+  function handleRecallAnswer() {
+    const pair = recallPairs[currentRecallIndex];
+    if (!pair) return;
+    setMemoryAnswers((prev) => [...prev, { type: 'recall', correct: normalizeAnswer(recallInput) === normalizeAnswer(pair.meaning), rt_ms: Date.now() - pairStartTime }]);
+    setRecallInput('');
+    if (currentRecallIndex + 1 < recallPairs.length) {
+      setCurrentRecallIndex((prev) => prev + 1);
+      setPairStartTime(Date.now());
+      return;
+    }
+    setCurrentRecallIndex(0);
+    setPairStartTime(Date.now());
+    setPhase('memory_recognition');
+  }
+
+  function handleRecognitionAnswer(choice: string) {
+    const pair = recognitionPairs[currentRecallIndex];
+    if (!pair) return;
+    setMemoryAnswers((prev) => [...prev, { type: 'recognition', correct: choice === pair.meaning, rt_ms: Date.now() - pairStartTime }]);
+    if (currentRecallIndex + 1 < recognitionPairs.length) {
+      setCurrentRecallIndex((prev) => prev + 1);
+      setPairStartTime(Date.now());
+      return;
+    }
+    setDigitIndex(0);
+    setPhase('digit_span');
+  }
+
+  function handleDigitAnswer() {
+    if (normalizeDigitAnswer(digitInput) === digitDeck[digitIndex].expected) {
+      setDigitSpanMax(digitDeck[digitIndex].digits.length);
+    }
+    if (digitIndex + 1 < digitDeck.length) {
+      setDigitIndex((prev) => prev + 1);
+      return;
+    }
+    setVisualIndex(0);
+    setPhase('visual');
+  }
+
+  function handleVisualAnswer(choice: number) {
+    const trial = visualDeck[visualIndex];
+    setVisualAnswers((prev) => [...prev, { correct: choice === trial.answer, rt_ms: Date.now() - visualStartTime }]);
+    if (visualIndex + 1 < visualDeck.length) {
+      setVisualIndex((prev) => prev + 1);
+      return;
+    }
+    setPhase('language');
+  }
+
+  async function handleLanguageAnswer(answer: string) {
+    if (!question || languageSubmitLock.current) return;
+    languageSubmitLock.current = true;
+
+    try {
+      const normalizedAnswer = question.prompt_type === 'SURFACE_TO_MEANING'
+        ? toCanonicalMeaningValue(preferences.locale, answer)
+        : answer;
+      const nextAnswers = [...languageAnswers, {
+        id: question.id,
+        prompt_type: question.prompt_type,
+        answer: normalizedAnswer,
+        rt_ms: Date.now() - languageStartTime.current,
+      }];
+      setLanguageAnswers(nextAnswers);
+      setLanguageInput('');
+
+      if (languageIndex + 1 < queue.length) {
+        setLanguageIndex((prev) => prev + 1);
+        return;
+      }
+
+      if (queue.length >= 24 && queue.length < 36) {
+        const evaluation = await evaluateBlock(nextAnswers);
+        if (evaluation && !evaluation.done && evaluation.next_items.length > 0) {
+          setAdaptiveReasons(evaluation.reason_codes);
+          setConfidencePreview(evaluation.confidence_by_axis);
+          setQueue((prev) => [...prev, ...evaluation.next_items]);
+          setLanguageIndex((prev) => prev + 1);
+          return;
+        }
+      }
+
+      await submitDiagnosis(nextAnswers);
+    } finally {
+      languageSubmitLock.current = false;
+    }
+  }
+
+  async function evaluateBlock(answeredItems: DiagnosisLanguageMicroAnswer[]) {
+    const token = await getValidAppToken();
+    const payload: DiagnosisEvaluateBlockRequest = {
+      answered_items: answeredItems,
+      cognitive_metrics: buildCognitiveMetrics(),
+      onboarding_profile: onboarding,
+    };
+    try {
+      const response = await fetch(`${BACKEND_URL}/v1/diagnosis/evaluate-block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) return null;
+      return await response.json() as DiagnosisEvaluateBlockResponse;
+    } catch {
+      return null;
+    }
+  }
+
+  async function submitDiagnosis(answers: DiagnosisLanguageMicroAnswer[]) {
+    setSubmitting(true);
+    setPhase('result');
+    const token = await getValidAppToken();
+    const payload: DiagnosisSubmitV4Request = {
+      phase: 'cognitive_v4',
+      onboarding_profile: onboarding,
+      cognitive_metrics: buildCognitiveMetrics(),
+      answers,
+    };
+    try {
+      const response = await fetch(`${BACKEND_URL}/v1/diagnosis/submit-v4`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${response.status}`);
+      }
+      setResult(await response.json() as DiagnosisResultResponse);
+    } catch (error) {
+      Alert.alert(copy.noDiagnosisResult, String(error));
+      setResult(result ?? bootstrap?.previous_result ?? null);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleSkip() {
+    if (Platform.OS === 'web' && typeof globalThis.confirm === 'function') {
+      if (globalThis.confirm(copy.skipMessage)) {
+        onSkip();
+      }
+      return;
+    }
+
+    Alert.alert(copy.skipTitle, copy.skipMessage, [
+      { text: copy.cancel, style: 'cancel' },
+      { text: copy.skip, onPress: onSkip },
+    ]);
+  }
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
+    <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
       <ScrollView contentContainerStyle={styles.container} keyboardShouldPersistTaps="handled">
-
-        {/* ── 인트로 ───────────────────────────────────── */}
         {phase === 'intro' && (
-          <View style={styles.phaseContainer}>
-            <Text style={styles.bigEmoji}>🎯</Text>
-            <Text style={styles.pageTitle}>학습 방식 진단</Text>
-            <Text style={styles.pageDesc}>
-              일본어 실력을 테스트하는 것이 아닙니다.{'\n'}
-              당신의 <Text style={{ fontWeight: '700' }}>기억 전략 유형</Text>을 파악합니다.
-            </Text>
-
-            <View style={styles.infoCard}>
-              <InfoRow icon="🧠" text="기억 인출 방식 (스스로 떠올리기 vs 보고 고르기)" />
-              <InfoRow icon="⚡" text="작업기억 용량 (한 번에 처리 가능한 정보량)" />
-              <InfoRow icon="👁" text="형태 변별력 (유사한 패턴 구분 능력)" />
-            </View>
-
-            <View style={styles.metaRow}>
-              <Text style={styles.metaText}>⏱ 약 6~8분</Text>
-              <Text style={styles.metaText}>📊 4단계</Text>
-            </View>
-
-            <TouchableOpacity style={styles.primaryBtn} onPress={() => setPhase('self_assessment')}>
-              <Text style={styles.primaryBtnText}>진단 시작 →</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={handleSkip} style={styles.skipBtn}>
-              <Text style={styles.skipText}>나중에 하기</Text>
-            </TouchableOpacity>
+          <View style={styles.panel}>
+            <Text style={styles.title}>{copy.introTitle}</Text>
+            <Text style={styles.desc}>{copy.introDescription}</Text>
+            {loadingBootstrap ? <ActivityIndicator color={colors.primary} /> : null}
+            <Action styles={styles} title={copy.startDiagnosis} onPress={() => setPhase('onboarding')} />
+            <Action styles={styles} title={copy.skip} onPress={handleSkip} secondary />
           </View>
         )}
 
-        {/* ── Phase 1: 자기평가 ────────────────────────── */}
-        {phase === 'self_assessment' && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={1} total={4} label="자기평가" />
-            <Text style={styles.sectionTitle}>학습 목표와 환경을 알려주세요</Text>
-
-            <Question label="목표 레벨">
-              {['N5', 'N4', 'N3', '회화 위주'].map((lv) => (
-                <SelectChip
-                  key={lv} label={lv}
-                  selected={selfAssessment.target_level === lv}
-                  onPress={() => setSelfAssessment((s) => ({ ...s, target_level: lv }))}
-                />
-              ))}
-            </Question>
-
-            <Question label="하루 학습 가능 시간">
-              {[5, 10, 20, 30].map((m) => (
-                <SelectChip
-                  key={m} label={`${m}분`}
-                  selected={selfAssessment.daily_minutes === m}
-                  onPress={() => setSelfAssessment((s) => ({ ...s, daily_minutes: m }))}
-                />
-              ))}
-            </Question>
-
-            <Question label="가장 어렵게 느끼는 부분 (복수 선택)">
-              {[
-                { key: 'reading', label: '읽기(발음)' },
-                { key: 'writing', label: '쓰기(표기)' },
-                { key: 'vocab',   label: '단어 암기' },
-                { key: 'grammar', label: '문법' },
-              ].map(({ key, label }) => (
-                <SelectChip
-                  key={key} label={label}
-                  selected={selfAssessment.weak_areas.includes(key)}
-                  onPress={() => {
-                    setSelfAssessment((s) => {
-                      const has = s.weak_areas.includes(key);
-                      return {
-                        ...s,
-                        weak_areas: has
-                          ? s.weak_areas.filter((x) => x !== key)
-                          : [...s.weak_areas, key],
-                      };
-                    });
-                  }}
-                />
-              ))}
-            </Question>
-
-            <TouchableOpacity
-              style={[
-                styles.primaryBtn,
-                (!selfAssessment.target_level || !selfAssessment.daily_minutes)
-                  && styles.primaryBtnDisabled,
-              ]}
-              disabled={!selfAssessment.target_level || !selfAssessment.daily_minutes}
-              onPress={() => setPhase('memory_study')}
-            >
-              <Text style={styles.primaryBtnText}>다음 →</Text>
-            </TouchableOpacity>
+        {phase === 'onboarding' && (
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.onboarding} current={1} />
+            <Section styles={styles} label={copy.targetLevel}>{TARGET_LEVEL_OPTIONS.map((value) => chip(styles, value, onboarding.target_level === value, () => setOnboarding((prev) => ({ ...prev, target_level: value }))))}</Section>
+            <Section styles={styles} label={copy.focus}>{(['READING', 'VOCAB', 'PRODUCTION'] as const).map((value) => chip(styles, copy.focusLabels[value], (onboarding.focus ?? []).includes(value), () => toggleFocus(value)))}</Section>
+            <Section styles={styles} label={copy.dailyMinutes}>{[10, 20, 30, 45].map((value) => chip(styles, formatMinuteLabel(preferences.locale, value), onboarding.daily_minutes === value, () => setOnboarding((prev) => ({ ...prev, daily_minutes: value }))))}</Section>
+            <Section styles={styles} label={copy.variability}>{(['low', 'medium', 'high'] as const).map((value) => chip(styles, copy.variabilityLabels[value], onboarding.weekly_variability === value, () => setOnboarding((prev) => ({ ...prev, weekly_variability: value as OnboardingProfile['weekly_variability'] }))))}</Section>
+            <Section styles={styles} label={copy.kanji}>{(['none', 'basic', 'native'] as const).map((value) => chip(styles, copy.kanjiLabels[value], onboarding.kanji_background === value, () => setOnboarding((prev) => ({ ...prev, kanji_background: value as OnboardingProfile['kanji_background'] }))))}</Section>
+            <Section styles={styles} label={copy.flags}>
+              {chip(styles, copy.offlineExpected, onboarding.offline_expected, () => setOnboarding((prev) => ({ ...prev, offline_expected: !prev.offline_expected })))}
+              {chip(styles, copy.notifications, onboarding.notifications_opt_in, () => setOnboarding((prev) => ({ ...prev, notifications_opt_in: !prev.notifications_opt_in })))}
+            </Section>
+            <TextInput style={styles.input} placeholder={copy.targetDatePlaceholder} placeholderTextColor={colors.textSoft} value={onboarding.target_date ?? ''} onChangeText={(value) => setOnboarding((prev) => ({ ...prev, target_date: value || null }))} />
+            <Action styles={styles} title={copy.continue} onPress={() => setPhase('memory_study')} />
           </View>
         )}
 
-        {/* ── Phase 2a: 기억쌍 학습 ─────────────────────── */}
         {phase === 'memory_study' && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={2} total={4} label="기억 방식 테스트" />
-            <Text style={styles.sectionTitle}>아래 기호-의미 쌍을 기억하세요</Text>
-            <Text style={styles.sectionDesc}>
-              {studyTimerLeft}초 후 자동으로 테스트가 시작됩니다.
-            </Text>
-
-            <View style={styles.studyTimer}>
-              <Text style={styles.timerText}>{studyTimerLeft}</Text>
-            </View>
-
-            <View style={styles.pairsGrid}>
-              {SYMBOL_PAIRS.map(({ id, symbol, meaning }) => (
-                <View key={id} style={styles.pairCard}>
-                  <Text style={styles.pairSymbol}>{symbol}</Text>
-                  <Text style={styles.pairArrow}>→</Text>
-                  <Text style={styles.pairMeaning}>{meaning}</Text>
-                </View>
-              ))}
-            </View>
-
-            <TouchableOpacity
-              style={[styles.primaryBtn, { backgroundColor: '#6B7280' }]}
-              onPress={() => {
-                if (studyTimerRef.current) clearInterval(studyTimerRef.current);
-                setCurrentPairIdx(0);
-                setPairStartTime(Date.now());
-                setPhase('memory_recall');
-              }}
-            >
-              <Text style={styles.primaryBtnText}>기억했어요 →</Text>
-            </TouchableOpacity>
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.memoryStudy} current={2} />
+            <Text style={styles.title}>{copy.memorizeFor(studyTimerLeft)}</Text>
+            <View style={styles.grid}>{memoryPairs.map((pair) => <View key={pair.id} style={styles.card}><Text style={styles.cardTitle}>{pair.symbol}</Text><Text style={styles.cardBody}>{pair.meaning}</Text></View>)}</View>
           </View>
         )}
 
-        {/* ── Phase 2b: 회상 테스트 ────────────────────── */}
         {phase === 'memory_recall' && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={2} total={4} label="기억 테스트 — 인출" />
-            <Text style={styles.sectionTitle}>
-              {currentPairIdx + 1}/{RECALL_PAIRS.length} — 이 기호의 의미는?
-            </Text>
-            <Text style={styles.sectionDesc}>
-              직접 입력해 보세요 (힌트 없이)
-            </Text>
-
-            <Text style={styles.bigSymbol}>{RECALL_PAIRS[currentPairIdx]?.symbol}</Text>
-
-            <TextInput
-              style={styles.textInput}
-              placeholder="의미를 입력하세요"
-              value={recallInput}
-              onChangeText={setRecallInput}
-              autoFocus
-              onSubmitEditing={handleRecallAnswer}
-            />
-
-            <TouchableOpacity style={styles.primaryBtn} onPress={handleRecallAnswer}>
-              <Text style={styles.primaryBtnText}>확인 →</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              onPress={() => {
-                setRecallInput('모름');
-                setTimeout(handleRecallAnswer, 50);
-              }}
-              style={styles.skipBtn}
-            >
-              <Text style={styles.skipText}>모르겠어요</Text>
-            </TouchableOpacity>
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.freeRecall} current={2} />
+            <Text style={styles.big}>{recallPairs[currentRecallIndex]?.symbol}</Text>
+            <TextInput style={styles.input} placeholder={copy.typeMeaning} placeholderTextColor={colors.textSoft} value={recallInput} onChangeText={setRecallInput} onSubmitEditing={handleRecallAnswer} />
+            <Action styles={styles} title={copy.continue} onPress={handleRecallAnswer} />
           </View>
         )}
 
-        {/* ── Phase 2c: 재인 테스트 ────────────────────── */}
         {phase === 'memory_recognition' && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={2} total={4} label="기억 테스트 — 재인" />
-            <Text style={styles.sectionTitle}>
-              {currentPairIdx + 1}/{RECOGNITION_PAIRS.length} — 이 기호의 의미는?
-            </Text>
-            <Text style={styles.sectionDesc}>보기에서 선택하세요</Text>
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.recognition} current={2} />
+            <Text style={styles.big}>{recognitionPairs[currentRecallIndex]?.symbol}</Text>
+            <View style={styles.stack}>{shuffle([recognitionPairs[currentRecallIndex]?.meaning ?? '', ...(recognitionPairs[currentRecallIndex]?.decoys ?? [])]).map((option) => <Action styles={styles} key={`${currentRecallIndex}-${option}`} title={option} onPress={() => handleRecognitionAnswer(option)} secondary />)}</View>
+          </View>
+        )}
 
-            <Text style={styles.bigSymbol}>{RECOGNITION_PAIRS[currentPairIdx]?.symbol}</Text>
+        {phase === 'digit_span' && (
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.digitSpan} current={3} />
+            <Text style={styles.desc}>{digitInstruction(preferences.locale, digitDeck[digitIndex]?.mode ?? 'reverse')}</Text>
+            {showDigits ? <Text style={styles.big}>{digitDeck[digitIndex].digits.join(' ')}</Text> : <>
+              <TextInput style={styles.input} placeholder={digitPlaceholder(preferences.locale, digitDeck[digitIndex]?.mode ?? 'reverse', copy.reverseDigits)} placeholderTextColor={colors.textSoft} keyboardType="numeric" value={digitInput} onChangeText={setDigitInput} onSubmitEditing={handleDigitAnswer} />
+              <Action styles={styles} title={copy.continue} onPress={handleDigitAnswer} />
+            </>}
+          </View>
+        )}
 
-            <View style={styles.mcqGrid}>
-              {shuffle([
-                RECOGNITION_PAIRS[currentPairIdx]?.meaning ?? '',
-                ...RECOGNITION_PAIRS[currentPairIdx]?.decoys ?? [],
-              ]).map((opt, i) => (
-                <TouchableOpacity
-                  key={`${opt}-${i}`}
-                  style={styles.mcqOption}
-                  onPress={() => handleRecognitionAnswer(opt)}
-                >
-                  <Text style={styles.mcqOptionText}>{opt}</Text>
-                </TouchableOpacity>
-              ))}
+        {phase === 'visual' && (
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.visual} current={4} />
+            <Text style={styles.desc}>{copy.visualPrompt}</Text>
+            <View style={styles.stack}>{visualDeck[visualIndex].options.map((option, index) => <Action styles={styles} key={`${option}-${index}`} title={option} onPress={() => handleVisualAnswer(index)} secondary />)}</View>
+          </View>
+        )}
+
+        {phase === 'language' && question && (
+          <View style={styles.panel}>
+            <Progress styles={styles} label={copy.language(languageIndex + 1, queue.length)} current={5} />
+            {adaptiveReasons.length > 0 && languageIndex >= 24 ? <View style={styles.notice}>{adaptiveReasons.map((reason) => <Text key={reason} style={styles.noticeText}>{translateAdaptiveReason(preferences.locale, reason)}</Text>)}</View> : null}
+            {confidencePreview ? <View style={styles.notice}>{Object.entries(confidencePreview).map(([key, value]) => <Text key={key} style={styles.noticeText}>{translateAxisLabel(preferences.locale, key)}: {Math.round(value * 100)}%</Text>)}</View> : null}
+            <Text style={styles.desc}>{promptLabel(question, copy)}</Text>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>{questionPrompt(preferences.locale, question)}</Text>
+              <Text style={styles.cardBody}>{questionHint(question, copy)}</Text>
             </View>
+            {question.choices?.length ? <View style={styles.stack}>{question.choices.map((choice) => <Action styles={styles} key={`${question.id}-${choice}`} title={questionChoiceLabel(preferences.locale, question, choice)} onPress={() => void handleLanguageAnswer(choice)} secondary />)}</View> : <>
+              <TextInput style={styles.input} placeholder={copy.typeAnswer} placeholderTextColor={colors.textSoft} value={languageInput} onChangeText={setLanguageInput} onSubmitEditing={() => void handleLanguageAnswer(languageInput)} />
+              <Action styles={styles} title={copy.continue} onPress={() => void handleLanguageAnswer(languageInput)} />
+            </>}
           </View>
         )}
 
-        {/* ── Phase 3: 역순 기억 ───────────────────────── */}
-        {phase === 'digit_span' && digitIdx < DIGIT_SEQUENCES.length && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={3} total={4} label="작업기억 테스트" />
-            <Text style={styles.sectionTitle}>
-              {digitIdx + 1}/{DIGIT_SEQUENCES.length} — 숫자를 <Text style={{ color: '#ef4444' }}>역순</Text>으로 입력하세요
-            </Text>
-            <Text style={styles.sectionDesc}>
-              {showDigits
-                ? '숫자를 기억하세요'
-                : '방금 본 숫자를 거꾸로 입력하세요'}
-            </Text>
-
-            {showDigits ? (
-              <View style={styles.digitRow}>
-                {DIGIT_SEQUENCES[digitIdx].digits.map((d, i) => (
-                  <Text key={i} style={styles.digitChar}>{d}</Text>
-                ))}
-              </View>
-            ) : (
-              <>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="역순으로 입력 (예: 9 3 7 → 739)"
-                  keyboardType="numeric"
-                  value={digitInput}
-                  onChangeText={setDigitInput}
-                  autoFocus
-                  onSubmitEditing={handleDigitAnswer}
-                />
-                <TouchableOpacity style={styles.primaryBtn} onPress={handleDigitAnswer}>
-                  <Text style={styles.primaryBtnText}>확인 →</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => { setDigitInput('?'); setTimeout(handleDigitAnswer, 50); }}
-                  style={styles.skipBtn}
-                >
-                  <Text style={styles.skipText}>모르겠어요</Text>
-                </TouchableOpacity>
-              </>
-            )}
-          </View>
-        )}
-
-        {/* ── Phase 4: 시각 변별 ───────────────────────── */}
-        {phase === 'visual_discrimination' && visualIdx < VISUAL_TRIALS.length && (
-          <View style={styles.phaseContainer}>
-            <PhaseIndicator current={4} total={4} label="시각 변별 테스트" />
-            <Text style={styles.sectionTitle}>
-              {visualIdx + 1}/{VISUAL_TRIALS.length} — {VISUAL_TRIALS[visualIdx].prompt}
-            </Text>
-            <Text style={styles.sectionDesc}>나머지와 다른 하나를 고르세요</Text>
-
-            <View style={styles.visualGrid}>
-              {VISUAL_TRIALS[visualIdx].options.map((opt, i) => (
-                <TouchableOpacity
-                  key={`${opt}-${i}`}
-                  style={styles.visualOption}
-                  onPress={() => handleVisualAnswer(i)}
-                >
-                  <Text style={styles.visualOptionText}>{opt}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-          </View>
-        )}
-
-        {/* ── 결과 ─────────────────────────────────────── */}
         {phase === 'result' && (
-          <View style={styles.phaseContainer}>
-            {loading ? (
-              <View style={{ alignItems: 'center', gap: 16, paddingVertical: 60 }}>
-                <ActivityIndicator size="large" color="#4A6CF7" />
-                <Text style={{ color: '#666' }}>결과를 분석 중입니다...</Text>
-              </View>
-            ) : result ? (
-              <ResultView result={result} onComplete={() => onComplete(result)} />
-            ) : (
-              <View style={{ alignItems: 'center', gap: 16 }}>
-                <Text style={styles.bigEmoji}>⚠️</Text>
-                <Text style={styles.sectionTitle}>결과 저장 중 오류</Text>
-                <TouchableOpacity style={styles.primaryBtn} onPress={() => onComplete()}>
-                  <Text style={styles.primaryBtnText}>기본 플랜으로 시작</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+          <View style={styles.panel}>
+            {submitting ? <><ActivityIndicator color={colors.primary} /><Text style={styles.desc}>{copy.savingResult}</Text></> : result ? <>
+              <Text style={styles.title}>{copy.diagnosisComplete}</Text>
+              <Text style={styles.desc}>{copy.diagnosisResultSummary(result.version, result.question_count ?? 0)}</Text>
+              <View style={styles.notice}>{Object.entries(result.strategy_vector).map(([key, value]) => <Text key={key} style={styles.noticeText}>{translateAxisLabel(preferences.locale, key)}: {Math.round((value ?? 0) * 100)}%</Text>)}</View>
+              {result.confidence_by_axis ? <View style={styles.notice}>{Object.entries(result.confidence_by_axis).map(([key, value]) => <Text key={key} style={styles.noticeText}>{translateAxisLabel(preferences.locale, key)}: {Math.round(value * 100)}%</Text>)}</View> : null}
+              {result.adaptive_reason_codes?.length ? <View style={styles.notice}>{result.adaptive_reason_codes.map((reason) => <Text key={reason} style={styles.noticeText}>{translateAdaptiveReason(preferences.locale, reason)}</Text>)}</View> : null}
+              <View style={styles.notice}>{result.notes.map((note) => <Text key={note} style={styles.noticeText}>{translateKnownNarrative(preferences.locale, note)}</Text>)}</View>
+              <Action styles={styles} title={copy.continueToPlan} onPress={() => onComplete(result)} />
+            </> : <>
+              <Text style={styles.title}>{copy.noDiagnosisResult}</Text>
+              <Action styles={styles} title={copy.continueWithDefaultPlan} onPress={() => onComplete()} />
+            </>}
           </View>
         )}
-
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
-// ─── 결과 뷰 ──────────────────────────────────────────────────
-
-function ResultView({ result, onComplete }: { result: DiagResult; onComplete: () => void }) {
-  const sv     = result.strategy_vector;
-  const axes = [
-    { key: 'recall_gap' as const,    label: '회상 ↔ 재인 격차', icon: '🧠' },
-    { key: 'reading_weak' as const,  label: '읽기 취약도',      icon: '📖' },
-    { key: 'form_weak' as const,     label: '형태 혼동',        icon: '👁' },
-    { key: 'load_sensitive' as const,label: '인지 부하 민감도', icon: '⚡' },
-  ];
-
-  return (
-    <View>
-      <Text style={styles.bigEmoji}>🎉</Text>
-      <Text style={styles.pageTitle}>진단 완료!</Text>
-      <Text style={styles.pageDesc}>당신의 학습 전략 프로파일입니다.</Text>
-
-      <View style={styles.infoCard}>
-        {axes.map(({ key, label, icon }) => {
-          const v = sv[key] ?? 0;
-          return (
-            <View key={key} style={{ marginBottom: 14 }}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ fontSize: 13, color: '#444' }}>{icon} {label}</Text>
-                <Text style={{ fontSize: 13, fontWeight: '700', color: barColor(v) }}>
-                  {Math.round(v * 100)}%
-                </Text>
-              </View>
-              <View style={styles.barTrack}>
-                <View
-                  style={[styles.barFill, {
-                    width: `${Math.round(v * 100)}%` as any,
-                    backgroundColor: barColor(v),
-                  }]}
-                />
-              </View>
-            </View>
-          );
-        })}
-      </View>
-
-      {result.notes && result.notes.length > 0 && (
-        <View style={styles.infoCard}>
-          <Text style={{ fontSize: 14, fontWeight: '700', color: '#1A1A2E', marginBottom: 10 }}>
-            💡 맞춤 인사이트
-          </Text>
-          {result.notes.map((n, i) => (
-            <Text key={i} style={{ fontSize: 13, color: '#444', lineHeight: 20, marginBottom: 6 }}>
-              • {n}
-            </Text>
-          ))}
-        </View>
-      )}
-
-      <TouchableOpacity style={styles.primaryBtn} onPress={onComplete}>
-        <Text style={styles.primaryBtnText}>맞춤 플랜으로 시작 →</Text>
-      </TouchableOpacity>
-    </View>
-  );
+function promptLabel(item: DiagnosisLanguageMicroItem, copy: ReturnType<typeof getDiagnosisUiCopy>): string {
+  if (item.prompt_type === 'SURFACE_TO_MEANING') return copy.promptLabels.surfaceToMeaning;
+  if (item.prompt_type === 'SURFACE_TO_READING') return copy.promptLabels.surfaceToReading;
+  if (item.prompt_type === 'MEANING_TO_SURFACE') return copy.promptLabels.meaningToSurface;
+  return copy.promptLabels.mcq;
 }
 
-// ─── 유틸 컴포넌트 ─────────────────────────────────────────────
-
-function PhaseIndicator({ current, total, label }: { current: number; total: number; label: string }) {
-  return (
-    <View style={{ marginBottom: 20 }}>
-      <View style={{ flexDirection: 'row', gap: 6, marginBottom: 6 }}>
-        {Array.from({ length: total }, (_, i) => (
-          <View
-            key={i}
-            style={{
-              height: 4, flex: 1, borderRadius: 2,
-              backgroundColor: i < current ? '#4A6CF7' : '#E5E7EB',
-            }}
-          />
-        ))}
-      </View>
-      <Text style={{ fontSize: 12, color: '#888' }}>
-        {current}/{total} — {label}
-      </Text>
-    </View>
-  );
+function questionPrompt(locale: Parameters<typeof getDiagnosisUiCopy>[0], item: DiagnosisLanguageMicroItem): string {
+  return item.prompt_type === 'MEANING_TO_SURFACE'
+    ? translateMeaningValue(locale, item.meaning_ko)
+    : item.surface;
 }
 
-function InfoRow({ icon, text }: { icon: string; text: string }) {
-  return (
-    <View style={{ flexDirection: 'row', gap: 10, marginBottom: 10, alignItems: 'flex-start' }}>
-      <Text style={{ fontSize: 16 }}>{icon}</Text>
-      <Text style={{ flex: 1, fontSize: 13, color: '#444', lineHeight: 20 }}>{text}</Text>
-    </View>
-  );
+function questionChoiceLabel(locale: Parameters<typeof getDiagnosisUiCopy>[0], item: DiagnosisLanguageMicroItem, choice: string): string {
+  return item.prompt_type === 'MCQ'
+    ? translateMeaningValue(locale, choice)
+    : choice;
 }
 
-function Question({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <View style={{ marginBottom: 20 }}>
-      <Text style={styles.questionLabel}>{label}</Text>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>{children}</View>
-    </View>
-  );
+function questionHint(item: DiagnosisLanguageMicroItem, copy: ReturnType<typeof getDiagnosisUiCopy>): string {
+  return copy.readingLabel(item.reading);
 }
 
-function SelectChip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
-  return (
-    <TouchableOpacity
-      style={[styles.chip, selected && styles.chipSelected]}
-      onPress={onPress}
-    >
-      <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{label}</Text>
-    </TouchableOpacity>
-  );
+function translateAxisLabel(locale: Parameters<typeof getDiagnosisUiCopy>[0], key: string): string {
+  const labels: Record<string, Record<'ko' | 'en' | 'ja', string>> = {
+    recall_gap: { ko: '회상 격차', en: 'Recall gap', ja: '想起ギャップ' },
+    reading_weak: { ko: '읽기 취약', en: 'Reading weakness', ja: '読みの弱点' },
+    form_weak: { ko: '표기 취약', en: 'Form weakness', ja: '表記の弱点' },
+    load_sensitive: { ko: '인지 부하 민감', en: 'Load sensitivity', ja: '認知負荷感度' },
+    lateness_fragile: { ko: '연체 취약', en: 'Lateness fragility', ja: '延滞脆弱性' },
+  };
+  return labels[key]?.[locale] ?? key;
 }
 
-function barColor(v: number): string {
-  if (v >= 0.7) return '#ef4444';
-  if (v >= 0.4) return '#f59e0b';
-  return '#10b981';
+type DiagnosisStyles = ReturnType<typeof createStyles>;
+
+function Progress({ label, current, styles }: { label: string; current: number; styles: DiagnosisStyles }) {
+  return <Text style={styles.progress}>{current}/5 - {label}</Text>;
 }
 
-function shuffle<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
+function Section({ label, children, styles }: { label: string; children: React.ReactNode; styles: DiagnosisStyles }) {
+  return <View style={{ width: '100%', marginBottom: 16 }}><Text style={styles.label}>{label}</Text><View style={styles.row}>{children}</View></View>;
+}
+
+function Action({ title, onPress, secondary, styles }: { title: string; onPress: () => void; secondary?: boolean; styles: DiagnosisStyles }) {
+  return <TouchableOpacity style={[styles.button, secondary && styles.buttonSecondary]} onPress={onPress}><Text style={[styles.buttonText, secondary && styles.buttonTextSecondary]}>{title}</Text></TouchableOpacity>;
+}
+
+function chip(styles: DiagnosisStyles, label: string, selected: boolean, onPress: () => void) {
+  return <TouchableOpacity key={label} style={[styles.chip, selected && styles.chipSelected]} onPress={onPress}><Text style={[styles.chipText, selected && styles.chipTextSelected]}>{label}</Text></TouchableOpacity>;
+}
+
+function shuffle<T>(values: T[]): T[] {
+  const copy = [...values];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
     const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
+    [copy[i], copy[j]] = [copy[j], copy[i]];
   }
-  return a;
+  return copy;
 }
 
-// ─── 스타일 ───────────────────────────────────────────────────
+function shuffleVisualTrial(trial: VisualTrial): VisualTrial {
+  const decorated = shuffle(trial.options.map((option, index) => ({ option, index })));
+  return {
+    options: decorated.map((item) => item.option),
+    answer: decorated.findIndex((item) => item.index === trial.answer),
+  };
+}
 
-const styles = StyleSheet.create({
-  container:      { padding: 24, backgroundColor: '#F8F9FF', flexGrow: 1 },
-  phaseContainer: { flex: 1, alignItems: 'center' },
+function buildMemoryPairSeeds(): MemoryPairSeed[] {
+  const symbols = shuffle([...MEMORY_SYMBOL_POOL]).slice(0, 6);
+  const meanings = shuffle([...MEMORY_MEANING_POOL]).slice(0, 6);
+  return symbols.map((symbol, index) => ({
+    id: `p${index + 1}`,
+    symbol,
+    meaning: meanings[index],
+    decoys: shuffle(meanings.filter((_, meaningIndex) => meaningIndex !== index)).slice(0, 3),
+  }));
+}
 
-  bigEmoji:  { fontSize: 60, marginBottom: 12, textAlign: 'center' },
-  pageTitle: { fontSize: 24, fontWeight: '800', color: '#1A1A2E', textAlign: 'center', marginBottom: 8 },
-  pageDesc:  { fontSize: 14, color: '#666', textAlign: 'center', lineHeight: 22, marginBottom: 24 },
+function buildDigitTrials(): DigitSpanTrial[] {
+  const modes = shuffle([...DIGIT_TRIAL_MODES]).slice(0, DIGIT_TRIAL_LENGTHS.length);
+  return DIGIT_TRIAL_LENGTHS.map((length, index) => {
+    const mode = modes[index] ?? 'reverse';
+    const digits = buildDigitSequence(length, mode);
+    return {
+      digits,
+      mode,
+      expected: computeDigitExpectedAnswer(digits, mode),
+    };
+  });
+}
 
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: '#1A1A2E', textAlign: 'center', marginBottom: 8 },
-  sectionDesc:  { fontSize: 13, color: '#888', textAlign: 'center', marginBottom: 20 },
+function buildDigitSequence(length: number, mode: DigitSpanMode): number[] {
+  const pool = shuffle([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const digits = pool.slice(0, length);
 
-  infoCard: {
-    width: '100%', backgroundColor: '#fff', borderRadius: 16, padding: 20,
-    marginBottom: 24,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06, shadowRadius: 8, elevation: 2,
-  },
-  metaRow:  { flexDirection: 'row', gap: 20, marginBottom: 24 },
-  metaText: { fontSize: 13, color: '#666' },
+  if (mode === 'odd_only' && digits.every((digit) => digit % 2 === 0)) {
+    digits[length - 1] = 7;
+  }
 
-  primaryBtn: {
-    width: '100%', backgroundColor: '#4A6CF7', borderRadius: 14,
-    padding: 18, alignItems: 'center', marginBottom: 12,
-  },
-  primaryBtnDisabled: { backgroundColor: '#CBD5E1' },
-  primaryBtnText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  return digits;
+}
 
-  skipBtn:  { padding: 10, alignItems: 'center' },
-  skipText: { color: '#aaa', fontSize: 14 },
+function computeDigitExpectedAnswer(digits: number[], mode: DigitSpanMode): string {
+  if (mode === 'forward') return digits.join('');
+  if (mode === 'ascending') return [...digits].sort((left, right) => left - right).join('');
+  if (mode === 'odd_only') return digits.filter((digit) => digit % 2 === 1).join('');
+  return [...digits].reverse().join('');
+}
 
-  studyTimer: {
-    width: 80, height: 80, borderRadius: 40,
-    backgroundColor: '#4A6CF7', alignItems: 'center', justifyContent: 'center', marginBottom: 24,
-  },
-  timerText: { color: '#fff', fontSize: 32, fontWeight: '800' },
+function normalizeDigitAnswer(value: string): string {
+  return value.replace(/\D+/g, '');
+}
 
-  pairsGrid: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginBottom: 24 },
-  pairCard: {
-    width: '47%', backgroundColor: '#fff', borderRadius: 12,
-    padding: 16, flexDirection: 'row', alignItems: 'center', gap: 8,
-    shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, elevation: 1,
-  },
-  pairSymbol:  { fontSize: 28 },
-  pairArrow:   { fontSize: 14, color: '#aaa' },
-  pairMeaning: { fontSize: 15, fontWeight: '600', color: '#1A1A2E' },
+function digitInstruction(locale: Parameters<typeof getDiagnosisUiCopy>[0], mode: DigitSpanMode): string {
+  if (locale === 'ko') {
+    if (mode === 'forward') return '숫자가 사라지면 본 순서 그대로 입력하세요.';
+    if (mode === 'ascending') return '숫자가 사라지면 작은 수부터 순서대로 입력하세요.';
+    if (mode === 'odd_only') return '숫자가 사라지면 홀수만 본 순서대로 입력하세요.';
+    return '숫자가 사라지면 거꾸로 입력하세요.';
+  }
+  if (locale === 'ja') {
+    if (mode === 'forward') return '数字が消えたら見た順番のまま入力してください。';
+    if (mode === 'ascending') return '数字が消えたら小さい順に入力してください。';
+    if (mode === 'odd_only') return '数字が消えたら奇数だけを見た順に入力してください。';
+    return '数字が消えたら逆順で入力してください。';
+  }
+  if (mode === 'forward') return 'When the digits disappear, enter them in the same order.';
+  if (mode === 'ascending') return 'When the digits disappear, enter them from smallest to largest.';
+  if (mode === 'odd_only') return 'When the digits disappear, enter only the odd digits in order.';
+  return 'When the digits disappear, enter them in reverse order.';
+}
 
-  bigSymbol: { fontSize: 80, marginVertical: 24, textAlign: 'center' },
+function digitPlaceholder(locale: Parameters<typeof getDiagnosisUiCopy>[0], mode: DigitSpanMode, fallback: string): string {
+  if (mode === 'reverse') return fallback;
+  if (locale === 'ko') {
+    if (mode === 'forward') return '본 순서대로 입력';
+    if (mode === 'ascending') return '작은 수부터 입력';
+    return '홀수만 입력';
+  }
+  if (locale === 'ja') {
+    if (mode === 'forward') return '見た順に入力';
+    if (mode === 'ascending') return '小さい順に入力';
+    return '奇数だけ入力';
+  }
+  if (mode === 'forward') return 'Enter the same order';
+  if (mode === 'ascending') return 'Enter from smallest';
+  return 'Enter odd digits only';
+}
 
-  textInput: {
-    width: '100%', borderWidth: 2, borderColor: '#E5E7EB',
-    borderRadius: 12, padding: 16, fontSize: 18,
-    backgroundColor: '#fff', marginBottom: 16, textAlign: 'center',
-  },
+function buildVisualTrials(): VisualTrial[] {
+  return Array.from({ length: 4 }, () => shuffleVisualTrial(generateVisualTrial()));
+}
 
-  mcqGrid: { width: '100%', gap: 10, marginBottom: 24 },
-  mcqOption: {
-    backgroundColor: '#fff', borderWidth: 1.5, borderColor: '#E5E7EB',
-    borderRadius: 12, padding: 18, alignItems: 'center',
-  },
-  mcqOptionText: { fontSize: 16, fontWeight: '600', color: '#1A1A2E' },
+function generateVisualTrial(): VisualTrial {
+  const base = buildVisualToken(3);
+  const odd = mutateVisualToken(base);
+  return {
+    options: [base, odd, base, base],
+    answer: 1,
+  };
+}
 
-  digitRow:  { flexDirection: 'row', gap: 12, marginBottom: 32 },
-  digitChar: { fontSize: 40, fontWeight: '800', color: '#4A6CF7' },
+function buildVisualToken(length: number): string {
+  return Array.from({ length }, () => sampleOne(VISUAL_CHAR_POOL)).join('');
+}
 
-  visualGrid: {
-    flexDirection: 'row', flexWrap: 'wrap', gap: 16,
-    justifyContent: 'center', marginBottom: 24,
-  },
-  visualOption: {
-    width: 90, height: 90, backgroundColor: '#fff',
-    borderRadius: 16, alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: '#E5E7EB',
-    shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, elevation: 2,
-  },
-  visualOptionText: { fontSize: 36, fontWeight: '700' },
+function mutateVisualToken(token: string): string {
+  const position = Math.floor(Math.random() * token.length);
+  const current = token[position];
+  const alternatives = VISUAL_CHAR_POOL.filter((char) => char !== current);
+  const replacement = sampleOne(alternatives);
+  return `${token.slice(0, position)}${replacement}${token.slice(position + 1)}`;
+}
 
-  questionLabel: { fontSize: 14, fontWeight: '600', color: '#444', marginBottom: 8 },
-  chip: {
-    paddingHorizontal: 16, paddingVertical: 10, borderRadius: 100,
-    borderWidth: 1.5, borderColor: '#E5E7EB', backgroundColor: '#fff',
-  },
-  chipSelected:    { backgroundColor: '#4A6CF7', borderColor: '#4A6CF7' },
-  chipText:        { fontSize: 14, color: '#555' },
-  chipTextSelected:{ color: '#fff', fontWeight: '700' },
+function sampleOne<T>(values: T[]): T {
+  return values[Math.floor(Math.random() * values.length)];
+}
 
-  barTrack: { height: 6, backgroundColor: '#F0F0F0', borderRadius: 3, overflow: 'hidden', marginTop: 4 },
-  barFill:  { height: 6, borderRadius: 3 },
-});
+function buildDiagnosisQueue(
+  coreItems: DiagnosisLanguageMicroItem[],
+): DiagnosisLanguageMicroItem[] {
+  if (coreItems.length === 0) {
+    return [];
+  }
+
+  const targetCounts = coreItems.reduce<Record<DiagnosisPromptType, number>>((acc, item) => {
+    acc[item.prompt_type] = (acc[item.prompt_type] ?? 0) + 1;
+    return acc;
+  }, {
+    SURFACE_TO_MEANING: 0,
+    SURFACE_TO_READING: 0,
+    MEANING_TO_SURFACE: 0,
+    MCQ: 0,
+  });
+
+  const combinedPool = shuffle(coreItems.map(cloneDiagnosisItem));
+  const picked: DiagnosisLanguageMicroItem[] = [];
+  const usedIds = new Set<string>();
+
+  for (const promptType of DIAGNOSIS_PROMPT_TYPES) {
+    const requiredCount = targetCounts[promptType];
+    if (requiredCount <= 0) continue;
+
+    for (const item of combinedPool) {
+      if (item.prompt_type !== promptType || usedIds.has(item.id)) continue;
+      picked.push(item);
+      usedIds.add(item.id);
+      if (picked.filter((candidate) => candidate.prompt_type === promptType).length >= requiredCount) {
+        break;
+      }
+    }
+  }
+
+  return shuffle(picked).slice(0, coreItems.length);
+}
+
+function cloneDiagnosisItem(item: DiagnosisLanguageMicroItem): DiagnosisLanguageMicroItem {
+  return {
+    ...item,
+    choices: item.choices ? shuffle(item.choices) : undefined,
+  };
+}
+
+function normalizeAnswer(value: string): string {
+  return value.trim().replace(/\s+/g, '').toLowerCase();
+}
+
+function formatMinuteLabel(locale: Parameters<typeof getDiagnosisUiCopy>[0], value: number): string {
+  if (locale === 'ko') return `${value}분`;
+  if (locale === 'ja') return `${value}分`;
+  return `${value} min`;
+}
+
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    container: {
+      padding: 20,
+      backgroundColor: colors.background,
+      flexGrow: 1,
+    },
+    panel: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 20,
+      gap: 14,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    title: {
+      fontSize: 24,
+      fontWeight: '800',
+      color: colors.text,
+      textAlign: 'center',
+    },
+    desc: {
+      fontSize: 14,
+      color: colors.textMuted,
+      textAlign: 'center',
+      lineHeight: 20,
+    },
+    progress: {
+      fontSize: 12,
+      color: colors.textMuted,
+      textAlign: 'center',
+    },
+    label: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.text,
+      marginBottom: 8,
+    },
+    row: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    chip: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 99,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceAlt,
+    },
+    chipSelected: {
+      backgroundColor: colors.primary,
+      borderColor: colors.primary,
+    },
+    chipText: {
+      color: colors.text,
+      fontSize: 13,
+    },
+    chipTextSelected: {
+      color: colors.onPrimary,
+      fontWeight: '700',
+    },
+    input: {
+      borderWidth: 1,
+      borderColor: colors.border,
+      borderRadius: 12,
+      padding: 14,
+      fontSize: 16,
+      textAlign: 'center',
+      color: colors.text,
+      backgroundColor: colors.background,
+    },
+    button: {
+      backgroundColor: colors.primary,
+      padding: 16,
+      borderRadius: 12,
+      alignItems: 'center',
+    },
+    buttonSecondary: {
+      backgroundColor: colors.primarySoft,
+      borderWidth: 1,
+      borderColor: colors.primaryBorder,
+    },
+    buttonText: {
+      color: colors.onPrimary,
+      fontSize: 15,
+      fontWeight: '700',
+    },
+    buttonTextSecondary: {
+      color: colors.primary,
+    },
+    grid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+    },
+    card: {
+      backgroundColor: colors.surfaceAlt,
+      borderRadius: 14,
+      padding: 16,
+      alignItems: 'center',
+    },
+    cardTitle: {
+      fontSize: 24,
+      fontWeight: '800',
+      color: colors.text,
+    },
+    cardBody: {
+      fontSize: 13,
+      color: colors.textMuted,
+      marginTop: 8,
+      textAlign: 'center',
+    },
+    big: {
+      fontSize: 40,
+      fontWeight: '800',
+      color: colors.text,
+      textAlign: 'center',
+    },
+    stack: {
+      gap: 10,
+    },
+    notice: {
+      backgroundColor: colors.surfaceAlt,
+      borderRadius: 12,
+      padding: 14,
+      gap: 4,
+    },
+    noticeText: {
+      fontSize: 13,
+      color: colors.text,
+      lineHeight: 18,
+    },
+  });
+}

@@ -1,5 +1,6 @@
 import { Request, Response, Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import type { DeleteMeResponse, MeResponse } from '@japanese-learn/shared';
 import { pool } from '../db/pool';
 import {
   hasGoogleOAuthConfig,
@@ -8,11 +9,29 @@ import {
   verifyGoogleIdToken,
 } from '../middleware/auth';
 import { ensureAllCardStatesForUser } from '../services/card-state-service';
+import {
+  buildUserPreferences,
+  DEFAULT_THEME,
+  DEFAULT_PRIVACY_SUMMARY,
+  normalizeSupportedLocale,
+  validateDeleteMePayload,
+  validatePreferencesUpdate,
+} from '../services/policy-service';
 
 const router = Router();
 
+interface UserRow {
+  user_id: string;
+  tz: string | null;
+  locale: string | null;
+  theme?: string | null;
+  consent_flags: Record<string, unknown>;
+  created_at: Date;
+  onboarding_profile: MeResponse['onboarding_profile'];
+}
+
 router.post('/google', async (req: Request, res: Response): Promise<void> => {
-  const { idToken, device = 'UNKNOWN' } = req.body ?? {};
+  const { idToken, device = 'UNKNOWN', locale } = req.body ?? {};
 
   if (!idToken || typeof idToken !== 'string') {
     res.status(400).json({ error: 'idToken is required.' });
@@ -45,10 +64,20 @@ router.post('/google', async (req: Request, res: Response): Promise<void> => {
     } else {
       userId = `u_${uuidv4().replace(/-/g, '').slice(0, 16)}`;
       isNewUser = true;
+      const preferences = buildUserPreferences({
+        locale: typeof locale === 'string' ? locale : null,
+        acceptLanguage: req.header('accept-language'),
+        theme: DEFAULT_THEME,
+      });
 
       await client.query(
-        `INSERT INTO users (user_id, consent_flags) VALUES ($1, $2)`,
-        [userId, JSON.stringify({ required: false, optional: false, research: false })]
+        `INSERT INTO users (user_id, locale, theme, consent_flags) VALUES ($1, $2, $3, $4)`,
+        [
+          userId,
+          preferences.locale,
+          preferences.theme,
+          JSON.stringify({ required: false, optional: false, research: false }),
+        ]
       );
 
       await client.query(
@@ -123,8 +152,10 @@ router.post('/logout', requireAuth, async (req: Request, res: Response): Promise
 router.get('/me', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const { userId } = req;
 
-  const { rows } = await pool.query(
-    `SELECT user_id, tz, locale, consent_flags, created_at FROM users WHERE user_id = $1`,
+  const { rows } = await pool.query<UserRow>(
+    `SELECT user_id, tz, locale, theme, consent_flags, created_at, onboarding_profile
+     FROM users
+     WHERE user_id = $1`,
     [userId]
   );
 
@@ -133,7 +164,71 @@ router.get('/me', requireAuth, async (req: Request, res: Response): Promise<void
     return;
   }
 
-  res.json(rows[0]);
+  const preferences = buildUserPreferences({
+    locale: rows[0].locale,
+    theme: rows[0].theme,
+    acceptLanguage: req.header('accept-language'),
+  });
+
+  res.json({
+    ...rows[0],
+    locale: preferences.locale,
+    privacy_summary: DEFAULT_PRIVACY_SUMMARY,
+    preferences,
+  });
+});
+
+router.patch('/preferences', requireAuth, async (req: Request, res: Response): Promise<void> => {
+  const { userId } = req;
+  const parsed = validatePreferencesUpdate(req.body);
+
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+
+  const updates: string[] = [];
+  const values: Array<string> = [];
+  if (parsed.locale) {
+    updates.push(`locale = $${values.length + 1}`);
+    values.push(parsed.locale);
+  }
+  if (parsed.theme) {
+    updates.push(`theme = $${values.length + 1}`);
+    values.push(parsed.theme);
+  }
+
+  values.push(userId!);
+
+  await pool.query(
+    `UPDATE users SET ${updates.join(', ')}, updated_at = NOW() WHERE user_id = $${values.length}`,
+    values,
+  );
+
+  const { rows } = await pool.query<UserRow>(
+    `SELECT user_id, tz, locale, theme, consent_flags, created_at, onboarding_profile
+     FROM users
+     WHERE user_id = $1`,
+    [userId],
+  );
+
+  if (rows.length === 0) {
+    res.status(404).json({ error: 'User not found.' });
+    return;
+  }
+
+  const preferences = buildUserPreferences({
+    locale: rows[0].locale,
+    theme: rows[0].theme,
+    acceptLanguage: req.header('accept-language'),
+  });
+
+  res.json({
+    ...rows[0],
+    locale: preferences.locale,
+    privacy_summary: DEFAULT_PRIVACY_SUMMARY,
+    preferences,
+  });
 });
 
 router.post('/consent', requireAuth, async (req: Request, res: Response): Promise<void> => {
@@ -168,26 +263,27 @@ router.post('/consent', requireAuth, async (req: Request, res: Response): Promis
 
 router.delete('/me', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const userId = req.userId!;
+  const parsed = validateDeleteMePayload(req.body);
+
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
 
   const client = await pool.connect();
   try {
+    console.info(`[auth/delete-me] userId=${userId} delete requested`);
     await client.query('BEGIN');
-
-    await client.query(`DELETE FROM user_sessions WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM review_log WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM card_state WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM diagnosis_results WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM user_error_agg WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM user_daily_agg WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM notification_prefs WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM experiments WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM oauth_accounts WHERE user_id = $1`, [userId]);
-    await client.query(`DELETE FROM users WHERE user_id = $1`, [userId]);
+    await deleteUserData(client, userId);
 
     await client.query('COMMIT');
 
     console.info(`[auth/delete-me] userId=${userId} deleted`);
-    res.status(204).send();
+    const response: DeleteMeResponse = {
+      deleted: true,
+      deleted_at: new Date().toISOString(),
+    };
+    res.json(response);
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('[auth/delete-me] error:', err);
@@ -203,7 +299,7 @@ router.post('/dev-init', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const { userId, device = 'WEB' } = req.body as { userId?: string; device?: string };
+  const { userId, device = 'WEB', locale } = req.body as { userId?: string; device?: string; locale?: string };
   if (!userId) {
     res.status(400).json({ error: 'userId is required.' });
     return;
@@ -213,9 +309,10 @@ router.post('/dev-init', async (req: Request, res: Response): Promise<void> => {
   try {
     await client.query('BEGIN');
 
+    const normalizedLocale = normalizeSupportedLocale(locale ?? req.header('accept-language'));
     await client.query(
-      `INSERT INTO users (user_id, consent_flags) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-      [userId, JSON.stringify({ required: true, optional: false, research: false })]
+      `INSERT INTO users (user_id, locale, theme, consent_flags) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+      [userId, normalizedLocale, DEFAULT_THEME, JSON.stringify({ required: true, optional: false, research: false })]
     );
 
     const insertedCardStates = await ensureAllCardStatesForUser(userId, client);
@@ -246,3 +343,20 @@ router.post('/dev-init', async (req: Request, res: Response): Promise<void> => {
 });
 
 export default router;
+
+async function deleteUserData(
+  client: Pick<typeof pool, 'query'>,
+  userId: string,
+): Promise<void> {
+  await client.query(`DELETE FROM user_sessions WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM review_log WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM card_state WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM diagnosis_results WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM model_params WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM user_error_agg WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM user_daily_agg WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM notification_prefs WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM experiments WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM oauth_accounts WHERE user_id = $1`, [userId]);
+  await client.query(`DELETE FROM users WHERE user_id = $1`, [userId]);
+}

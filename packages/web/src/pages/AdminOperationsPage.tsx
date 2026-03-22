@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import type { AaValidationResponse, ReportBatchResponse } from '@japanese-learn/shared';
+import type { AaValidationResponse, ReportBatchResponse, ShadowStatusResponse } from '@japanese-learn/shared';
 import type { AdminKeySnapshot } from '../services/admin-api';
 import {
   clearAdminKey,
   fetchAaValidation,
+  fetchShadowStatus,
   getAdminKeySnapshot,
   runReportBatch,
   setAdminKey,
@@ -47,7 +48,9 @@ export default function AdminOperationsPage() {
   const [batchResult, setBatchResult] = useState<ReportBatchResponse | null>(null);
   const [lastAaValidatedAt, setLastAaValidatedAt] = useState<string | null>(null);
   const [lastBatchRunAt, setLastBatchRunAt] = useState<string | null>(null);
-  const [loadingAction, setLoadingAction] = useState<'aa' | 'batch' | ''>('');
+  const [shadowStatus, setShadowStatus] = useState<ShadowStatusResponse | null>(null);
+  const [lastShadowLoadedAt, setLastShadowLoadedAt] = useState<string | null>(null);
+  const [loadingAction, setLoadingAction] = useState<'aa' | 'batch' | 'shadow' | ''>('');
   const [error, setError] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
@@ -139,7 +142,7 @@ export default function AdminOperationsPage() {
       return;
     }
 
-    setLoadingAction('batch');
+    setLoadingAction('shadow');
     setError('');
     setStatusMessage('');
     try {
@@ -160,6 +163,35 @@ export default function AdminOperationsPage() {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
       pushActivity(makeActivity('report.batch', 'error', message));
+    } finally {
+      setLoadingAction('');
+    }
+  }
+
+  async function handleLoadShadowStatus() {
+    if (!hasSavedKey) {
+      const message = 'Save an Admin API key before loading shadow status.';
+      setError(message);
+      setStatusMessage('');
+      pushActivity(makeActivity('shadow.status', 'error', message));
+      return;
+    }
+
+    setLoadingAction('batch');
+    setError('');
+    setStatusMessage('');
+    try {
+      const result = await fetchShadowStatus();
+      const loadedAt = new Date().toISOString();
+      setShadowStatus(result);
+      setLastShadowLoadedAt(loadedAt);
+      refreshKeySnapshot();
+      setStatusMessage('Shadow status loaded.');
+      pushActivity(makeActivity('shadow.status', 'success', `Loaded ${result.users.length} user rows and cohort status.`));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      pushActivity(makeActivity('shadow.status', 'error', message));
     } finally {
       setLoadingAction('');
     }
@@ -329,8 +361,84 @@ export default function AdminOperationsPage() {
               <strong>Failed Users</strong>
               <span>{batchResult.failed_users ?? '-'}</span>
             </div>
+            <div style={styles.resultRow}>
+              <strong>Shadow Models Refreshed</strong>
+              <span>{batchResult.shadow_models_refreshed ?? '-'}</span>
+            </div>
           </div>
         )}
+      </section>
+
+      <section style={styles.adminPanel}>
+        <h3 style={styles.sectionTitle}>Shadow Gate Status</h3>
+        <p style={styles.subtext}>Readiness snapshot for user-level and cohort-level HLR promotion.</p>
+        {!hasSavedKey && (
+          <p style={styles.warningText}>A saved Admin API key is required before shadow status can load.</p>
+        )}
+        <div style={styles.buttonRow}>
+          <button
+            type="button"
+            style={styles.primaryButton}
+            onClick={handleLoadShadowStatus}
+            disabled={loadingAction !== '' || !hasSavedKey}
+          >
+            {loadingAction === 'shadow' ? 'Loading...' : 'Load Shadow Status'}
+          </button>
+        </div>
+
+        {shadowStatus?.cohort ? (
+          <div style={styles.resultBox}>
+            <div style={styles.resultRow}>
+              <strong>Cohort State</strong>
+              <span>{shadowStatus.cohort.eligibility_state}</span>
+            </div>
+            <div style={styles.resultRow}>
+              <strong>Cohort Failure Reason</strong>
+              <span>{shadowStatus.cohort.failure_reason ?? '-'}</span>
+            </div>
+            <div style={styles.resultRow}>
+              <strong>Cohort Log Loss</strong>
+              <span>{shadowStatus.cohort.calibration_score.log_loss.toFixed(4)}</span>
+            </div>
+            <div style={styles.resultRow}>
+              <strong>Cohort Baseline</strong>
+              <span>{shadowStatus.cohort.calibration_score.baseline_log_loss.toFixed(4)}</span>
+            </div>
+            <div style={styles.resultRow}>
+              <strong>Loaded At</strong>
+              <span>{formatDateTime(lastShadowLoadedAt)}</span>
+            </div>
+          </div>
+        ) : null}
+
+        {shadowStatus?.users?.length ? (
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>scope</th>
+                <th style={styles.th}>subject</th>
+                <th style={styles.th}>state</th>
+                <th style={styles.th}>log_loss</th>
+                <th style={styles.th}>baseline</th>
+                <th style={styles.th}>reason</th>
+                <th style={styles.th}>evaluated_at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shadowStatus.users.map((entry, index) => (
+                <tr key={`${entry.scope}-${entry.subject_id}`} style={index % 2 === 0 ? styles.trEven : styles.trOdd}>
+                  <td style={styles.td}>{entry.scope}</td>
+                  <td style={styles.td}>{entry.subject_id}</td>
+                  <td style={styles.td}>{entry.eligibility_state}</td>
+                  <td style={styles.td}>{entry.calibration_score.log_loss.toFixed(4)}</td>
+                  <td style={styles.td}>{entry.calibration_score.baseline_log_loss.toFixed(4)}</td>
+                  <td style={styles.td}>{entry.failure_reason ?? '-'}</td>
+                  <td style={styles.td}>{entry.last_shadow_eval_at ? new Date(entry.last_shadow_eval_at).toLocaleString() : '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </section>
 
       <section style={styles.adminPanel}>

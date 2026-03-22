@@ -1,345 +1,546 @@
-/**
- * PlanScreen — 개인화 학습 플랜
- *
- * report.mdc 설계 원칙:
- *  - strategy_vector(recall_gap, reading_weak, form_weak, load_sensitive) 시각화
- *  - 행동 데이터 기반 개인화(학습 스타일 자기보고 X)
- *  - 설명 가능한 3–5문장 인사이트
- */
-
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
+import type {
+  DiagnosisEvidence,
+  DiagnosisResultResponse,
+  MeResponse,
+  PlanResponse,
+  SupportedLocale,
+} from '@japanese-learn/shared';
 import { getValidAppToken } from '../services/secure-storage';
-import type { DiagnosisResultResponse, PlanResponse } from '@japanese-learn/shared';
+import { useSettings } from '../providers/settings-provider';
+import {
+  translateCounterfactual,
+  translateDiagnosisEvidenceNote,
+  translateKnownNarrative,
+  translatePlanBasis,
+  translatePlanEvidence,
+  translatePlanFactor,
+} from '../i18n/diagnosis-plan';
+import type { ThemeColors } from '../theme';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
 type StrategyVector = DiagnosisResultResponse['strategy_vector'];
-type DiagResult = DiagnosisResultResponse;
 
 interface PlanScreenProps {
   userId: string;
   onRestartDiagnosis: () => void;
 }
 
-export default function PlanScreen({ userId, onRestartDiagnosis }: PlanScreenProps) {
-  const [diagResult, setDiagResult] = useState<DiagResult | null>(null);
+type PlanCopy = {
+  axisLabels: Record<keyof StrategyVector, string>;
+  planRows: {
+    newCards: string;
+    reviewCards: string;
+    readingShare: string;
+    productionShare: string;
+    hintSteps: string;
+    chunkMin: string;
+  };
+  recovery: {
+    mode: string;
+    overdue: string;
+    minutes: string;
+  };
+  evidenceSource: Record<DiagnosisEvidence['source'], string>;
+  versionSummary: (version: string, questionCount: number) => string;
+  minuteUnit: (count: number) => string;
+};
+
+const PLAN_COPY: Record<SupportedLocale, PlanCopy> = {
+  ko: {
+    axisLabels: {
+      recall_gap: '회상 격차',
+      reading_weak: '읽기 취약',
+      form_weak: '표기 취약',
+      load_sensitive: '인지 부하 민감',
+      lateness_fragile: '연체 취약',
+    },
+    planRows: {
+      newCards: '신규 카드',
+      reviewCards: '복습 카드',
+      readingShare: '읽기 비중',
+      productionShare: '산출 비중',
+      hintSteps: '힌트 단계',
+      chunkMin: '세션 청크',
+    },
+    recovery: {
+      mode: '모드',
+      overdue: '연체 카드',
+      minutes: '권장 시간',
+    },
+    evidenceSource: {
+      self_report: '자기 보고',
+      cognitive: '인지',
+      language_micro: '언어 마이크로',
+      behavior: '행동',
+    },
+    versionSummary: (version, questionCount) => `버전 ${version} · 문항 ${questionCount}개`,
+    minuteUnit: (count) => `${count}분`,
+  },
+  en: {
+    axisLabels: {
+      recall_gap: 'Recall gap',
+      reading_weak: 'Reading weakness',
+      form_weak: 'Form weakness',
+      load_sensitive: 'Load sensitivity',
+      lateness_fragile: 'Lateness fragility',
+    },
+    planRows: {
+      newCards: 'New cards',
+      reviewCards: 'Review cards',
+      readingShare: 'Reading share',
+      productionShare: 'Production share',
+      hintSteps: 'Hint steps',
+      chunkMin: 'Session chunk',
+    },
+    recovery: {
+      mode: 'Mode',
+      overdue: 'Overdue cards',
+      minutes: 'Recommended time',
+    },
+    evidenceSource: {
+      self_report: 'Self report',
+      cognitive: 'Cognitive',
+      language_micro: 'Language micro',
+      behavior: 'Behavior',
+    },
+    versionSummary: (version, questionCount) => `Version ${version} · ${questionCount} questions`,
+    minuteUnit: (count) => `${count} min`,
+  },
+  ja: {
+    axisLabels: {
+      recall_gap: '想起ギャップ',
+      reading_weak: '読みの弱点',
+      form_weak: '表記の弱点',
+      load_sensitive: '認知負荷感度',
+      lateness_fragile: '延滞脆弱性',
+    },
+    planRows: {
+      newCards: '新規カード',
+      reviewCards: '復習カード',
+      readingShare: '読み比率',
+      productionShare: '産出比率',
+      hintSteps: 'ヒント段階',
+      chunkMin: 'セッション区切り',
+    },
+    recovery: {
+      mode: 'モード',
+      overdue: '延滞カード',
+      minutes: '推奨時間',
+    },
+    evidenceSource: {
+      self_report: '自己報告',
+      cognitive: '認知',
+      language_micro: '言語マイクロ',
+      behavior: '行動',
+    },
+    versionSummary: (version, questionCount) => `バージョン ${version} ・ ${questionCount} 問`,
+    minuteUnit: (count) => `${count}分`,
+  },
+};
+
+const AXIS_KEYS: Array<keyof StrategyVector> = [
+  'recall_gap',
+  'reading_weak',
+  'form_weak',
+  'load_sensitive',
+];
+
+export default function PlanScreen({ onRestartDiagnosis }: PlanScreenProps) {
+  const { colors, preferences, t } = useSettings();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const locale = preferences.locale;
+  const copy = PLAN_COPY[locale];
+  const [diagnosis, setDiagnosis] = useState<DiagnosisResultResponse | null>(null);
   const [plan, setPlan] = useState<PlanResponse | null>(null);
-  const [loading, setLoading]       = useState(true);
+  const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const token = await getValidAppToken();
-      if (!token) { setLoading(false); return; }
-
-      const res = await fetch(
-        `${BACKEND_URL}/v1/diagnosis/result`,
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
-      if (res.ok) {
-        const data = await res.json() as DiagResult;
-        setDiagResult(data);
-
-        const planRes = await fetch(`${BACKEND_URL}/v1/plan/generate`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            constraints: { daily_minutes: data.strategy_vector.load_sensitive >= 0.6 ? 10 : 20, max_new: 10 },
-            analysis_result: { strategy_vector: data.strategy_vector },
-          }),
-        });
-
-        if (planRes.ok) {
-          const planData = await planRes.json() as PlanResponse;
-          setPlan(planData);
-        } else {
-          setPlan(null);
-        }
+      if (!token) {
+        setDiagnosis(null);
+        setPlan(null);
+        return;
       }
-    } catch {
-      // 오프라인
+
+      const [diagRes, meRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/v1/diagnosis/result`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${BACKEND_URL}/v1/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      if (!diagRes.ok) {
+        setDiagnosis(null);
+        setPlan(null);
+        return;
+      }
+
+      const nextDiagnosis = await diagRes.json() as DiagnosisResultResponse;
+      setDiagnosis(nextDiagnosis);
+      const mePayload = meRes.ok ? await meRes.json() as MeResponse : null;
+
+      const response = await fetch(`${BACKEND_URL}/v1/plan/generate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          goal: {
+            target_level: mePayload?.onboarding_profile?.target_level,
+            target_date: mePayload?.onboarding_profile?.target_date ?? undefined,
+            focus: mePayload?.onboarding_profile?.focus ?? [],
+          },
+          constraints: {
+            daily_minutes: mePayload?.onboarding_profile?.daily_minutes ?? 20,
+            max_new: 10,
+            offline_expected: Boolean(mePayload?.onboarding_profile?.offline_expected),
+          },
+          analysis_result: {
+            strategy_vector: nextDiagnosis.strategy_vector,
+          },
+        }),
+      });
+
+      setPlan(response.ok ? await response.json() as PlanResponse : null);
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   if (loading) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#4A6CF7" />
+        <ActivityIndicator size="large" color={colors.primary} />
       </View>
     );
   }
 
-  if (!diagResult) {
+  if (!diagnosis) {
     return (
       <View style={styles.center}>
-        <Text style={styles.emptyIcon}>🎯</Text>
-        <Text style={styles.emptyTitle}>진단 결과가 없습니다</Text>
-        <Text style={styles.emptyDesc}>
-          학습 방식 진단을 완료하면{'\n'}맞춤형 플랜을 생성할 수 있습니다.
-        </Text>
-        <TouchableOpacity onPress={onRestartDiagnosis} style={styles.diagBtn}>
-          <Text style={styles.diagBtnText}>📋 학습 방식 진단 시작</Text>
+        <Text style={styles.emptyTitle}>{t('plan.missingTitle')}</Text>
+        <Text style={styles.emptyDescription}>{t('plan.missingDesc')}</Text>
+        <TouchableOpacity onPress={() => void onRestartDiagnosis()} style={styles.primaryButton}>
+          <Text style={styles.primaryButtonText}>{t('plan.restartDiagnosis')}</Text>
         </TouchableOpacity>
       </View>
     );
   }
 
-  const sv = diagResult.strategy_vector;
-
-  const axes: { key: keyof StrategyVector; label: string; desc: string; icon: string }[] = [
-    { key: 'recall_gap',   label: '회상 vs 재인 격차', desc: '스스로 떠올리기 vs 보고 고르기',    icon: '🧠' },
-    { key: 'reading_weak', label: '읽기 취약도',       desc: '표기→읽기(발음) 정확도 저하 수준',  icon: '📖' },
-    { key: 'form_weak',    label: '형태 혼동 민감도',  desc: '유사 형태 오답 비율',               icon: '👁' },
-    { key: 'load_sensitive', label: '인지 부하 민감도', desc: '작업기억 용량과 복잡도 내성',       icon: '⚡' },
-  ];
-
-  const insights = plan?.notes?.length ? plan.notes : buildInsights(sv, diagResult.weakness_flags ?? []);
-  const planItems = plan ? buildPlanFromServer(plan) : buildPlan(sv);
-
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.pageTitle}>📊 학습 전략 프로파일</Text>
-      <Text style={styles.pageDesc}>
-        진단 결과를 기반으로 생성된 맞춤형 학습 플랜입니다.
-      </Text>
+      <Text style={styles.pageTitle}>{t('plan.title')}</Text>
+      <Text style={styles.pageDescription}>{t('plan.subtitle')}</Text>
 
-      {/* 전략 벡터 */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>학습 방식 벡터</Text>
-        {axes.map(({ key, label, desc, icon }) => {
-          const value = sv[key] ?? 0;
+      <SectionCard colors={colors} title={t('plan.strategyVector')}>
+        {AXIS_KEYS.map((axisKey) => {
+          const value = diagnosis.strategy_vector[axisKey] ?? 0;
           return (
-            <View key={key} style={styles.axisRow}>
-              <Text style={styles.axisIcon}>{icon}</Text>
-              <View style={{ flex: 1 }}>
-                <View style={styles.axisHeader}>
-                  <Text style={styles.axisLabel}>{label}</Text>
-                  <Text style={styles.axisValue}>{Math.round(value * 100)}%</Text>
-                </View>
-                <Text style={styles.axisDesc}>{desc}</Text>
-                <View style={styles.barTrack}>
-                  <View
-                    style={[styles.barFill, { width: `${Math.round(value * 100)}%` as any, backgroundColor: barColor(value) }]}
-                  />
-                </View>
+            <View key={axisKey} style={styles.axisBlock}>
+              <View style={styles.axisHeader}>
+                <Text style={styles.axisLabel}>{copy.axisLabels[axisKey]}</Text>
+                <Text style={styles.axisValue}>{Math.round(value * 100)}%</Text>
+              </View>
+              <View style={styles.barTrack}>
+                <View style={[styles.barFill, { width: `${Math.round(value * 100)}%` }]} />
               </View>
             </View>
           );
         })}
-      </View>
+      </SectionCard>
 
-      {/* 인사이트 */}
-      {insights.length > 0 && (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>💡 진단 인사이트</Text>
-          {insights.map((note, i) => (
-            <View key={i} style={styles.insightRow}>
-              <Text style={styles.insightBullet}>•</Text>
-              <Text style={styles.insightText}>{note}</Text>
+      <SectionCard colors={colors} title={t('plan.notes')}>
+        <Text style={styles.metaLine}>{copy.versionSummary(diagnosis.version, diagnosis.question_count ?? 0)}</Text>
+        {diagnosis.notes.map((note) => (
+          <Text key={note} style={styles.listText}>
+            • {translateKnownNarrative(locale, note)}
+          </Text>
+        ))}
+      </SectionCard>
+
+      {plan ? (
+        <SectionCard colors={colors} title={t('plan.summary')}>
+          {buildPlanRows(plan, copy).map((row) => (
+            <View key={row.label} style={styles.row}>
+              <Text style={styles.rowLabel}>{row.label}</Text>
+              <Text style={styles.rowValue}>{row.value}</Text>
             </View>
           ))}
-        </View>
-      )}
+        </SectionCard>
+      ) : null}
 
-      {/* 집중 강화 영역 */}
-      {diagResult.weakness_flags.length > 0 && (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>⚠️ 집중 강화 영역</Text>
-          <View style={styles.flagRow}>
-            {diagResult.weakness_flags.map((f) => (
-              <View key={f} style={styles.flagBadge}>
-                <Text style={styles.flagText}>{flagLabel(f)}</Text>
-              </View>
-            ))}
-          </View>
-        </View>
-      )}
-
-      {/* 오늘의 학습 플랜 */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>📅 오늘의 학습 플랜</Text>
-        {planItems.map((item, i) => (
-          <View key={i} style={styles.planRow}>
-            <Text style={styles.planBullet}>{item.icon}</Text>
-            <View>
-              <Text style={styles.planLabel}>{item.label}</Text>
-              <Text style={styles.planValue}>{item.value}</Text>
+      {plan?.explanation_receipt?.length ? (
+        <SectionCard colors={colors} title={t('plan.explanation')}>
+          {plan.explanation_receipt.map((receipt, index) => (
+            <View key={`${receipt.factor}-${index}`} style={styles.listBlock}>
+              <Text style={styles.listTitle}>
+                {translatePlanFactor(locale, receipt.factor)} · {translatePlanBasis(locale, receipt.basis)}
+              </Text>
+              <Text style={styles.listText}>{translatePlanEvidence(locale, receipt.evidence)}</Text>
+              <Text style={styles.listText}>{translateKnownNarrative(locale, receipt.effect)}</Text>
+              {receipt.counterfactual ? (
+                <Text style={styles.counterfactual}>
+                  {t('plan.counterfactual')}: {translateCounterfactual(locale, receipt.counterfactual)}
+                </Text>
+              ) : null}
             </View>
+          ))}
+        </SectionCard>
+      ) : null}
+
+      {plan?.recovery_plan?.active ? (
+        <SectionCard colors={colors} title={t('plan.recovery')}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{copy.recovery.mode}</Text>
+            <Text style={styles.rowValue}>{translateRecoveryMode(locale, plan.recovery_plan.mode)}</Text>
           </View>
-        ))}
-      </View>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{copy.recovery.overdue}</Text>
+            <Text style={styles.rowValue}>{plan.recovery_plan.overdue_count}</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{copy.recovery.minutes}</Text>
+            <Text style={styles.rowValue}>{copy.minuteUnit(plan.recovery_plan.recommended_minutes)}</Text>
+          </View>
+          <Text style={styles.listText}>{translateKnownNarrative(locale, plan.recovery_plan.summary)}</Text>
+        </SectionCard>
+      ) : null}
 
-      {plan?.experiment_variant && (
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>🧪 현재 적용 실험</Text>
-          <Text style={styles.insightText}>
-            현재 플랜은 `{plan.experiment_variant}` 변형을 기반으로 계산되었습니다.
-          </Text>
-        </View>
-      )}
+      {diagnosis.evidence.length ? (
+        <SectionCard colors={colors} title={t('plan.evidence')}>
+          {diagnosis.evidence.map((item, index) => (
+            <View key={`${item.factor}-${index}`} style={styles.listBlock}>
+              <Text style={styles.listTitle}>
+                {translatePlanFactor(locale, item.factor)} · {copy.evidenceSource[item.source]}
+              </Text>
+              <Text style={styles.listText}>{String(item.value)}</Text>
+              <Text style={styles.listText}>{translateDiagnosisEvidenceNote(locale, item.note)}</Text>
+            </View>
+          ))}
+        </SectionCard>
+      ) : null}
 
-      <TouchableOpacity onPress={onRestartDiagnosis} style={styles.reDiagBtn}>
-        <Text style={styles.reDiagText}>🔄 진단 다시 받기</Text>
+      {diagnosis.confidence_by_axis ? (
+        <SectionCard colors={colors} title={t('plan.confidence')}>
+          {Object.entries(diagnosis.confidence_by_axis).map(([key, value]) => {
+            const axisKey = key as keyof StrategyVector;
+            return (
+              <View key={key} style={styles.row}>
+                <Text style={styles.rowLabel}>{copy.axisLabels[axisKey] ?? key}</Text>
+                <Text style={styles.rowValue}>{Math.round(value * 100)}%</Text>
+              </View>
+            );
+          })}
+        </SectionCard>
+      ) : null}
+
+      <TouchableOpacity onPress={() => void onRestartDiagnosis()} style={styles.secondaryButton}>
+        <Text style={styles.secondaryButtonText}>{t('plan.restartDiagnosis')}</Text>
       </TouchableOpacity>
     </ScrollView>
   );
 }
 
-// ─── 유틸 ──────────────────────────────────────────────────────
-
-function barColor(v: number): string {
-  if (v >= 0.7) return '#ef4444';
-  if (v >= 0.4) return '#f59e0b';
-  return '#10b981';
-}
-
-function flagLabel(flag: string): string {
-  const map: Record<string, string> = {
-    recall_weak:      '회상 강화 필요',
-    reading_weak:     '읽기 취약',
-    form_weak:        '형태 혼동',
-    load_sensitive:   '인지 부하 주의',
-    lateness_fragile: '연체 위험',
-  };
-  return map[flag] ?? flag;
-}
-
-function buildInsights(sv: StrategyVector, flags: string[]): string[] {
-  const notes: string[] = [];
-  if (sv.recall_gap >= 0.5)
-    notes.push('선택지를 보면 맞히지만 스스로 떠올리기가 어렵습니다. 빈칸 채우기 중심으로 연습이 필요합니다.');
-  else if (sv.recall_gap < 0.2)
-    notes.push('회상력과 재인력 모두 고른 편입니다. 다양한 문항 유형을 활용해 보세요.');
-
-  if (sv.reading_weak >= 0.6)
-    notes.push('표기는 알지만 읽기(발음)에서 오류가 잦습니다. 표기→읽기 카드 비중을 높입니다.');
-
-  if (sv.form_weak >= 0.5)
-    notes.push('비슷하게 생긴 단어/한자를 혼동하는 경향이 있습니다. 혼동쌍 특별 복습이 필요합니다.');
-
-  if (sv.load_sensitive >= 0.6)
-    notes.push('한 번에 많은 정보를 처리하기 어렵습니다. 신규 카드 수를 줄이고 세그먼트를 활용합니다.');
-
-  if (flags.length === 0 && notes.length === 0)
-    notes.push('고른 학습 능력을 갖추고 있습니다. 간격 반복 스케줄을 유지하세요.');
-
-  return notes;
-}
-
-function buildPlan(sv: StrategyVector): { icon: string; label: string; value: string }[] {
-  const daily_new   = sv.load_sensitive >= 0.6 ? 5 : sv.load_sensitive >= 0.4 ? 8 : 10;
-  const reading_pct = sv.reading_weak >= 0.6 ? 40 : 25;
-  const recall_pct  = sv.recall_gap >= 0.4 ? 60 : 50;
-  const mcq_pct     = 100 - recall_pct;
-
+function buildPlanRows(plan: PlanResponse, copy: PlanCopy): Array<{ label: string; value: string }> {
   return [
-    { icon: '📌', label: '신규 카드/일', value: `${daily_new}장` },
-    { icon: '🔁', label: '회상형 문항 비율', value: `${recall_pct}%` },
-    { icon: '🔘', label: '선택형(MCQ) 비율', value: `${mcq_pct}%` },
-    { icon: '📖', label: '읽기 특화 비율', value: `+${reading_pct}%p` },
-    { icon: '💡', label: '힌트 단계', value: sv.load_sensitive >= 0.6 ? '2단계' : '1단계' },
+    { label: copy.planRows.newCards, value: String(plan.daily_budget.new_count) },
+    { label: copy.planRows.reviewCards, value: String(plan.daily_budget.review_count) },
+    { label: copy.planRows.readingShare, value: `${Math.round(plan.mix.SURFACE_TO_READING * 100)}%` },
+    { label: copy.planRows.productionShare, value: `${Math.round(plan.mix.MEANING_TO_SURFACE * 100)}%` },
+    { label: copy.planRows.hintSteps, value: String(plan.ui_policy.hint_steps) },
+    { label: copy.planRows.chunkMin, value: copy.minuteUnit(plan.ui_policy.session_chunk_min) },
   ];
 }
 
-function buildPlanFromServer(plan: PlanResponse): { icon: string; label: string; value: string }[] {
-  return [
-    { icon: '📌', label: '신규 카드/일', value: `${plan.daily_budget.new_count}장` },
-    { icon: '🔁', label: '복습 카드/일', value: `${plan.daily_budget.review_count}장` },
-    {
-      icon: '📖',
-      label: '읽기 문항 비율',
-      value: `${Math.round((plan.mix.SURFACE_TO_READING ?? 0) * 100)}%`,
-    },
-    {
-      icon: '🔘',
-      label: '선택형(MCQ) 비율',
-      value: `${Math.round((plan.mix.MCQ ?? 0) * 100)}%`,
-    },
-    {
-      icon: '🧩',
-      label: '문맥형(CLOZE) 비율',
-      value: `${Math.round((plan.mix.CLOZE ?? 0) * 100)}%`,
-    },
-    {
-      icon: '🔊',
-      label: '듣기형 비율',
-      value: `${Math.round((plan.mix.LISTENING ?? 0) * 100)}%`,
-    },
-    {
-      icon: '💡',
-      label: '힌트 단계',
-      value: `${plan.ui_policy.hint_steps}단계`,
-    },
-    {
-      icon: '⏱',
-      label: '세션 단위',
-      value: `${plan.ui_policy.session_chunk_min}분`,
-    },
-  ];
+function translateRecoveryMode(locale: SupportedLocale, mode: NonNullable<PlanResponse['recovery_plan']>['mode']): string {
+  if (locale === 'ko') {
+    if (mode === 'seven_day') return '7일';
+    if (mode === 'three_day') return '3일';
+    return '15분 집중';
+  }
+  if (locale === 'ja') {
+    if (mode === 'seven_day') return '7日';
+    if (mode === 'three_day') return '3日';
+    return '15分集中';
+  }
+  if (mode === 'seven_day') return '7-day';
+  if (mode === 'three_day') return '3-day';
+  return '15-min focus';
 }
 
-const styles = StyleSheet.create({
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 32 },
-  emptyIcon:  { fontSize: 56 },
-  emptyTitle: { fontSize: 20, fontWeight: '700', color: '#1A1A2E' },
-  emptyDesc:  { textAlign: 'center', color: '#666', lineHeight: 22 },
-  diagBtn: {
-    marginTop: 8, backgroundColor: '#4A6CF7',
-    paddingHorizontal: 24, paddingVertical: 14, borderRadius: 12,
-  },
-  diagBtnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+function SectionCard(props: { colors: ThemeColors; title: string; children: React.ReactNode }) {
+  const styles = createStyles(props.colors);
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>{props.title}</Text>
+      {props.children}
+    </View>
+  );
+}
 
-  container:   { padding: 20, backgroundColor: '#F8F9FF', flexGrow: 1 },
-  pageTitle:   { fontSize: 20, fontWeight: '800', color: '#1A1A2E', marginBottom: 6 },
-  pageDesc:    { fontSize: 13, color: '#666', marginBottom: 20, lineHeight: 20 },
-
-  card: {
-    backgroundColor: '#fff', borderRadius: 16, padding: 20,
-    marginBottom: 16,
-    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06, shadowRadius: 8, elevation: 2,
-  },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A2E', marginBottom: 14 },
-
-  axisRow:    { flexDirection: 'row', alignItems: 'flex-start', gap: 12, marginBottom: 14 },
-  axisIcon:   { fontSize: 20, marginTop: 2 },
-  axisHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 2 },
-  axisLabel:  { fontSize: 13, fontWeight: '600', color: '#333' },
-  axisValue:  { fontSize: 13, fontWeight: '700', color: '#4A6CF7' },
-  axisDesc:   { fontSize: 11, color: '#999', marginBottom: 6 },
-  barTrack: { height: 6, backgroundColor: '#F0F0F0', borderRadius: 3, overflow: 'hidden' },
-  barFill:  { height: 6, borderRadius: 3 },
-
-  insightRow:   { flexDirection: 'row', gap: 8, marginBottom: 10 },
-  insightBullet:{ fontSize: 14, color: '#4A6CF7', marginTop: 1 },
-  insightText:  { flex: 1, fontSize: 13, color: '#444', lineHeight: 20 },
-
-  flagRow:  { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  flagBadge:{
-    backgroundColor: '#FEF3C7', paddingHorizontal: 12,
-    paddingVertical: 6, borderRadius: 100,
-  },
-  flagText: { fontSize: 12, color: '#D97706', fontWeight: '600' },
-
-  planRow:   { flexDirection: 'row', gap: 12, alignItems: 'flex-start', marginBottom: 12 },
-  planBullet:{ fontSize: 18 },
-  planLabel: { fontSize: 12, color: '#888', marginBottom: 2 },
-  planValue: { fontSize: 15, fontWeight: '700', color: '#1A1A2E' },
-
-  reDiagBtn: {
-    borderWidth: 1.5, borderColor: '#4A6CF7', borderRadius: 12,
-    padding: 14, alignItems: 'center', marginBottom: 32,
-  },
-  reDiagText: { color: '#4A6CF7', fontWeight: '700' },
-});
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    container: {
+      padding: 20,
+      paddingBottom: 36,
+      backgroundColor: colors.background,
+      flexGrow: 1,
+    },
+    center: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 28,
+      backgroundColor: colors.background,
+      gap: 12,
+    },
+    pageTitle: {
+      fontSize: 26,
+      fontWeight: '800',
+      color: colors.text,
+      marginBottom: 8,
+    },
+    pageDescription: {
+      fontSize: 14,
+      color: colors.textMuted,
+      lineHeight: 21,
+      marginBottom: 18,
+    },
+    card: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 18,
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    cardTitle: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: colors.text,
+      marginBottom: 12,
+    },
+    axisBlock: {
+      marginBottom: 12,
+    },
+    axisHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginBottom: 6,
+    },
+    axisLabel: {
+      color: colors.textMuted,
+      fontSize: 13,
+      fontWeight: '600',
+    },
+    axisValue: {
+      color: colors.primary,
+      fontWeight: '700',
+    },
+    barTrack: {
+      height: 8,
+      borderRadius: 999,
+      backgroundColor: colors.surfaceAlt,
+      overflow: 'hidden',
+    },
+    barFill: {
+      height: 8,
+      borderRadius: 999,
+      backgroundColor: colors.primary,
+    },
+    metaLine: {
+      color: colors.textSoft,
+      marginBottom: 10,
+      fontSize: 12,
+    },
+    row: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      gap: 12,
+      marginBottom: 10,
+    },
+    rowLabel: {
+      color: colors.textMuted,
+      fontSize: 13,
+    },
+    rowValue: {
+      color: colors.text,
+      fontWeight: '700',
+      fontSize: 13,
+    },
+    listBlock: {
+      marginBottom: 12,
+    },
+    listTitle: {
+      color: colors.text,
+      fontWeight: '700',
+      marginBottom: 4,
+    },
+    listText: {
+      color: colors.textMuted,
+      lineHeight: 20,
+      marginBottom: 6,
+      fontSize: 13,
+    },
+    counterfactual: {
+      color: colors.warning,
+      lineHeight: 20,
+      fontSize: 13,
+    },
+    emptyTitle: {
+      fontSize: 22,
+      fontWeight: '800',
+      color: colors.text,
+    },
+    emptyDescription: {
+      textAlign: 'center',
+      color: colors.textMuted,
+      lineHeight: 21,
+    },
+    primaryButton: {
+      minHeight: 50,
+      minWidth: 200,
+      borderRadius: 14,
+      backgroundColor: colors.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 20,
+    },
+    primaryButtonText: {
+      color: colors.onPrimary,
+      fontWeight: '700',
+    },
+    secondaryButton: {
+      minHeight: 48,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: colors.primaryBorder,
+      backgroundColor: colors.primarySoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    secondaryButtonText: {
+      color: colors.primary,
+      fontWeight: '700',
+    },
+  });
+}

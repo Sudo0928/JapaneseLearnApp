@@ -13,6 +13,7 @@
 
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import { fetchWithTimeout } from './network';
 import { getValidAppToken } from './secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
@@ -57,7 +58,7 @@ export async function registerPushToken(): Promise<string | null> {
     // 서버에 토큰 등록
     const appToken = await getValidAppToken();
     if (appToken) {
-      await fetch(`${BACKEND_URL}/v1/notifications/token`, {
+      await fetchWithTimeout(`${BACKEND_URL}/v1/notifications/token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -151,7 +152,7 @@ export async function syncPrefsToServer(prefs: NotificationPrefs): Promise<void>
   const token = await getValidAppToken();
   if (!token) return;
 
-  await fetch(`${BACKEND_URL}/v1/notifications/prefs`, {
+  await fetchWithTimeout(`${BACKEND_URL}/v1/notifications/prefs`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',
@@ -166,7 +167,7 @@ export async function loadPrefsFromServer(): Promise<NotificationPrefs | null> {
   if (!token) return null;
 
   try {
-    const res = await fetch(`${BACKEND_URL}/v1/notifications/prefs`, {
+    const res = await fetchWithTimeout(`${BACKEND_URL}/v1/notifications/prefs`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     return res.ok ? (await res.json() as NotificationPrefs) : null;

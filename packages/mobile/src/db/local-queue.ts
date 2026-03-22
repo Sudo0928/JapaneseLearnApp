@@ -91,3 +91,8 @@ export async function getQueueStats(): Promise<{
 
   return rows[0] ?? { total: 0, pending: 0, synced: 0, failed: 0 };
 }
+
+export async function clearQueue(): Promise<void> {
+  const sqlite = await getNativeDb();
+  await sqlite.runAsync('DELETE FROM event_queue');
+}

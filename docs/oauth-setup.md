@@ -26,7 +26,7 @@
 #### Android 클라이언트
 1. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
 2. 애플리케이션 유형: **Android**
-3. 패키지 이름: `com.japaneselearn.app`
+3. 패키지 이름: `snowdrop.japanese.learn.app`
 4. SHA-1 인증서 지문 등록:
    ```bash
    # 개발용 (debug.keystore)
@@ -37,7 +37,7 @@
 
 #### iOS 클라이언트
 1. 애플리케이션 유형: **iOS**
-2. Bundle ID: `com.japaneselearn.app`
+2. Bundle ID: `snowdrop.japanese.learn.app`
 3. 생성된 클라이언트 ID를 `EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS`로 저장
 
 #### 웹 클라이언트 (백엔드 토큰 검증용)
@@ -61,7 +61,7 @@ EXPO_PUBLIC_BACKEND_URL=http://localhost:3000
 `packages/backend/.env` 파일 생성:
 
 ```env
-DATABASE_URL=postgresql://user:password@localhost:5432/japanese_learn_dev
+DATABASE_URL=postgresql://postgres:your_password@localhost:5432/japanese_learn_dev
 PORT=3000
 NODE_ENV=development
 GOOGLE_CLIENT_ID=xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com

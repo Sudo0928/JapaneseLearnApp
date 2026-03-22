@@ -13,18 +13,31 @@
     },
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.japaneselearn.app"
+      "bundleIdentifier": "snowdrop.japanese.learn.app"
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#FFFFFF"
       },
-      "package": "com.japaneselearn.app"
+      "package": "snowdrop.japanese.learn.app",
+      "versionCode": 17
     },
     "plugins": [
       "expo-secure-store",
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "kotlinVersion": "1.9.25",
+            "compileSdkVersion": 35,
+            "targetSdkVersion": 35,
+            "buildToolsVersion": "35.0.0"
+          }
+        }
+      ],
+      "@react-native-google-signin/google-signin"
     ],
     "scheme": "japaneselearn",
     "web": {
@@ -32,6 +45,11 @@
       "output": "single",
       "favicon": "./assets/icon.png",
       "template": "./web/index.html"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "1b9541ea-f399-4141-8820-628c2d81247b"
+      }
     }
   }
 }

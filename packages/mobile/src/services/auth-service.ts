@@ -2,11 +2,19 @@ import * as AuthSession from 'expo-auth-session';
 import * as Google from 'expo-auth-session/providers/google';
 import * as WebBrowser from 'expo-web-browser';
 import { Platform } from 'react-native';
+import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import { saveAppToken, clearAuthData, STORAGE_KEYS, secureSet } from './secure-storage';
 
 WebBrowser.maybeCompleteAuthSession();
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
+
+function currentSupportedLocale(): 'ko' | 'en' | 'ja' {
+  const locale = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase();
+  if (locale.startsWith('en')) return 'en';
+  if (locale.startsWith('ja')) return 'ja';
+  return 'ko';
+}
 
 function normalizeGoogleClientId(value?: string): string {
   const trimmed = value?.trim() ?? '';
@@ -16,6 +24,7 @@ function normalizeGoogleClientId(value?: string): string {
 const GOOGLE_WEB_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_WEB);
 const GOOGLE_IOS_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_IOS);
 const GOOGLE_ANDROID_CLIENT_ID = normalizeGoogleClientId(process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID_ANDROID);
+let googleNativeConfigured = false;
 
 function getCurrentPlatformClientId(): string {
   if (Platform.OS === 'ios') return GOOGLE_IOS_CLIENT_ID;
@@ -35,6 +44,32 @@ function getMissingClientIdError(): LoginResult {
     success: false,
     error: `Google OAuth client ID is missing for ${Platform.OS}. Check packages/mobile/.env.`,
   };
+}
+
+function getMissingNativeGoogleClientIdError(): LoginResult {
+  return {
+    success: false,
+    error: 'Google OAuth web client ID is missing for Android native sign-in. Check packages/mobile/.env.',
+  };
+}
+
+function getGoogleNativeErrorMessage(err: unknown): string {
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as { code?: unknown }).code ?? '') : '';
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+    return 'Google Play Services is unavailable or outdated on this device.';
+  }
+
+  if (code === statusCodes.IN_PROGRESS) {
+    return 'Google login is already in progress. Please try again in a moment.';
+  }
+
+  if (code === '10' || message.includes('DEVELOPER_ERROR')) {
+    return 'Android Google Sign-In is misconfigured. Verify the Android OAuth client package name and SHA-1 in Google Cloud Console.';
+  }
+
+  return err instanceof Error ? err.message : `OAuth error: ${String(err)}`;
 }
 
 function useGoogleWebLogin() {
@@ -141,18 +176,70 @@ function useGoogleNativeLogin() {
   return { login, isLoading: !request };
 }
 
+function configureGoogleNativeSdk() {
+  if (googleNativeConfigured) {
+    return;
+  }
+
+  GoogleSignin.configure({
+    webClientId: GOOGLE_WEB_CLIENT_ID || undefined,
+    iosClientId: GOOGLE_IOS_CLIENT_ID || undefined,
+    offlineAccess: false,
+    profileImageSize: 120,
+  });
+  googleNativeConfigured = true;
+}
+
+function useGoogleAndroidNativeLogin() {
+  async function login(): Promise<LoginResult> {
+    if (!GOOGLE_WEB_CLIENT_ID) {
+      return getMissingNativeGoogleClientIdError();
+    }
+
+    try {
+      configureGoogleNativeSdk();
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      const result = await GoogleSignin.signIn();
+
+      if (result.type === 'cancelled') {
+        return { success: false, error: 'Login was cancelled.' };
+      }
+
+      const idToken = result.data.idToken;
+      if (!idToken) {
+        return { success: false, error: 'Google did not return an ID token.' };
+      }
+
+      return exchangeIdTokenForAppToken(idToken);
+    } catch (err) {
+      return {
+        success: false,
+        error: getGoogleNativeErrorMessage(err),
+      };
+    }
+  }
+
+  return { login, isLoading: false };
+}
+
 export function useGoogleLogin() {
-  const clientId = getCurrentPlatformClientId();
+  const clientId = Platform.OS === 'android' ? GOOGLE_WEB_CLIENT_ID : getCurrentPlatformClientId();
 
   if (!clientId) {
     return {
-      login: async (): Promise<LoginResult> => getMissingClientIdError(),
+      login: async (): Promise<LoginResult> => (
+        Platform.OS === 'android' ? getMissingNativeGoogleClientIdError() : getMissingClientIdError()
+      ),
       isLoading: false,
     };
   }
 
   if (Platform.OS === 'web') {
     return useGoogleWebLogin();
+  }
+
+  if (Platform.OS === 'android') {
+    return useGoogleAndroidNativeLogin();
   }
 
   return useGoogleNativeLogin();
@@ -170,6 +257,7 @@ export async function exchangeIdTokenForAppToken(idToken: string): Promise<Login
           : Platform.OS === 'android'
             ? 'ANDROID'
             : 'WEB',
+        locale: currentSupportedLocale(),
       }),
     });
 
@@ -195,6 +283,13 @@ export async function logout(appToken: string): Promise<void> {
       headers: { Authorization: `Bearer ${appToken}` },
     });
   } finally {
+    if (Platform.OS === 'android') {
+      try {
+        await GoogleSignin.signOut();
+      } catch {
+        // Ignore native sign-out failures; app token removal is authoritative.
+      }
+    }
     await clearAuthData();
   }
 }

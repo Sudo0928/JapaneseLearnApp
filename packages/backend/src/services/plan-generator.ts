@@ -1,31 +1,21 @@
-/**
- * 개인화 학습 플랜 생성기 (HLR-lite + 규칙 믹서)
- *
- * HLR-lite 수식 (rules/report.mdc):
- *   p = 2^(-t / half_life)          — 회상확률 근사
- *   t_next = -half_life * log2(r*)  — 목표 유지율 r* 만족 간격
- *   맞으면: half_life *= 1.15
- *   틀리면: half_life *= 0.70
- *
- * 플랜 생성 흐름:
- * 1) strategy_vector 조회 (또는 진단 결과로부터 직접 수신)
- * 2) 룰 엔진으로 daily_budget + mix + ui_policy 생성
- * 3) HLR-lite로 카드별 우선순위 보완 (선택적, P1 고도화)
- * 4) plan_id + 결과 반환
- */
-
 import { v4 as uuidv4 } from 'uuid';
+import type {
+  PlanExplanationReceipt,
+  PlanResponse as ApiPlanResponse,
+  RecoveryPlan,
+} from '@japanese-learn/shared';
+import { pool } from '../db/pool';
 import { computeStrategyVector, deriveWeaknessFlags, StrategyVector } from './strategy-analyzer';
 import { applyRules, PlanConfig } from './rule-engine';
 import { getVariant } from './experiment-service';
 
 export interface PlanRequest {
   user_id: string;
-  date: string;                          // YYYY-MM-DD
+  date: string;
   goal: {
-    target_level?: string;               // 'JLPT_N5' | 'JLPT_N4' | ...
+    target_level?: string;
     target_date?: string;
-    focus?: string[];                    // ['READING', 'VOCAB', ...]
+    focus?: string[];
   };
   constraints: {
     daily_minutes: number;
@@ -33,83 +23,89 @@ export interface PlanRequest {
     offline_expected?: boolean;
   };
   analysis_result?: {
-    strategy_vector?: StrategyVector;    // 클라이언트 제공 (진단 결과)
-    retention_target?: number;           // 0.8 ~ 0.95
+    strategy_vector?: StrategyVector;
+    retention_target?: number;
   };
 }
 
-export interface PlanResponse {
-  plan_id: string;
-  date: string;
-  user_id: string;
-  daily_budget: PlanConfig['daily_budget'];
-  mix: PlanConfig['mix'];
-  ui_policy: PlanConfig['ui_policy'];
-  retention_target: number;
-  notes: string[];
-  experiment_variant?: string;   // P1-2: 어떤 실험 variant가 적용됐는지 투명하게 노출
+export interface PlanResponse extends ApiPlanResponse {
   debug?: { rule_log: string[]; strategy_vector: StrategyVector };
 }
 
-/**
- * 일일 학습 플랜 생성
- */
+type PlanMixRecord = PlanConfig['mix'];
+
 export async function generatePlan(req: PlanRequest): Promise<PlanResponse> {
   const { user_id, date, constraints, goal, analysis_result } = req;
+  const level = inferLevel(goal.target_level);
+  const diagnosisVector = analysis_result?.strategy_vector ?? await loadLatestDiagnosisVector(user_id);
+  const behaviorProfile = await computeStrategyVector(user_id, 28);
+  const hasBehaviorBlend = behaviorProfile.event_count >= 10;
 
-  // 1) strategy_vector 확정
-  //    진단 결과가 있으면 사용, 없으면 review_log에서 계산
-  let vector: StrategyVector;
-  if (analysis_result?.strategy_vector) {
-    vector = analysis_result.strategy_vector;
-  } else {
-    const profile = await computeStrategyVector(user_id, 28);
-    vector = profile.vector;
-  }
+  let vector = diagnosisVector
+    ? blendVectors(diagnosisVector, behaviorProfile.vector, hasBehaviorBlend ? 0.6 : 1)
+    : behaviorProfile.vector;
+
+  vector = {
+    ...vector,
+    lateness_fragile: hasBehaviorBlend ? round3(behaviorProfile.vector.lateness_fragile ?? 0) : 0,
+  };
 
   const flags = deriveWeaknessFlags(vector);
+  let retentionTarget = analysis_result?.retention_target
+    ?? (level === 'beginner' ? 0.85 : level === 'intermediate' ? 0.89 : 0.92);
+  const explanationReceipt: PlanExplanationReceipt[] = [];
 
-  // 2) 레벨 추정
-  const level = inferLevel(goal.target_level);
-
-  // 3) 목표 유지율 확정
-  const retention_target = analysis_result?.retention_target
-    ?? (level === 'beginner' ? 0.85 : 0.90);
-
-  // 4) 룰 엔진 실행
   const config = applyRules({
     vector,
     flags,
     daily_minutes: Math.max(5, Math.min(120, constraints.daily_minutes)),
-    retention_target,
+    retention_target: retentionTarget,
     level,
     max_new_override: constraints.max_new,
   });
 
-  // 5) P1-2: 실험 variant 조회 및 믹스 오버라이드
-  //    ab_plan_mix treatment: SURFACE_TO_READING +10%p (다른 비중 감산으로 정규화)
+  if (hasBehaviorBlend) {
+    explanationReceipt.push({
+      factor: 'behavior_blend',
+      basis: 'behavior',
+      evidence: `recent_review_events=${behaviorProfile.event_count}`,
+      effect: 'Behavior data contributes to the final strategy vector and keeps lateness risk behavior-only.',
+    });
+  }
+
+  applyGoalAwareAdjustments({
+    goal,
+    constraints,
+    config,
+    receipt: explanationReceipt,
+    retentionTargetRef: (value) => {
+      retentionTarget = value;
+    },
+  });
+
   const experimentVariant = await getVariant(user_id, 'ab_plan_mix').catch(() => 'not_in_experiment');
-  let finalMix = { ...config.mix };
-  const experimentNotes: string[] = [];
-
   if (experimentVariant === 'treatment') {
-    const delta = 0.10;
-    const before = finalMix.SURFACE_TO_READING ?? 0;
-    finalMix.SURFACE_TO_READING = Math.min(1, before + delta);
+    config.mix = shiftMix(config.mix, 'SURFACE_TO_READING', 0.1, 'SURFACE_TO_MEANING');
+    config.notes.push('Experiment treatment increases reading prompts by 10 percentage points.');
+    explanationReceipt.push({
+      factor: 'ab_plan_mix',
+      basis: 'behavior',
+      evidence: 'variant=treatment',
+      effect: 'SURFACE_TO_READING share increased by 10 percentage points for experiment exposure.',
+    });
+  }
 
-    // 증가분을 SURFACE_TO_MEANING에서 차감 (합계 1.0 유지)
-    const excess = finalMix.SURFACE_TO_READING - before;
-    finalMix.SURFACE_TO_MEANING = Math.max(0, (finalMix.SURFACE_TO_MEANING ?? 0) - excess);
+  pushWeaknessReceipts(vector, flags, explanationReceipt);
 
-    // 재정규화 (소수점 오차 보정)
-    const total = Object.values(finalMix).reduce((a, b) => a + b, 0);
-    if (total > 0) {
-      for (const key of Object.keys(finalMix) as Array<keyof typeof finalMix>) {
-        finalMix[key] = Math.round((finalMix[key] / total) * 1000) / 1000;
-      }
-    }
-
-    experimentNotes.push('[실험] ab_plan_mix treatment: 표기→읽기 비중 +10%p 적용');
+  const overdueCount = await getOverdueCount(user_id);
+  const recoveryPlan = buildRecoveryPlan(overdueCount, config.daily_budget.minutes);
+  if (recoveryPlan?.active) {
+    explanationReceipt.push({
+      factor: 'recovery_plan',
+      basis: 'recovery',
+      evidence: `overdue_cards=${overdueCount}`,
+      effect: recoveryPlan.summary,
+    });
   }
 
   const plan_id = `plan_${date.replace(/-/g, '')}_${uuidv4().slice(0, 8)}`;
@@ -119,11 +115,13 @@ export async function generatePlan(req: PlanRequest): Promise<PlanResponse> {
     date,
     user_id,
     daily_budget: config.daily_budget,
-    mix: finalMix,
+    mix: normalizeMix(config.mix),
     ui_policy: config.ui_policy,
-    retention_target: config.retention_target,
-    notes: [...config.notes, ...experimentNotes],
+    retention_target: round3(retentionTarget),
+    notes: [...config.notes],
     experiment_variant: experimentVariant !== 'not_in_experiment' ? experimentVariant : undefined,
+    explanation_receipt: explanationReceipt,
+    recovery_plan: recoveryPlan,
     debug: {
       rule_log: config.rule_log,
       strategy_vector: vector,
@@ -131,59 +129,254 @@ export async function generatePlan(req: PlanRequest): Promise<PlanResponse> {
   };
 }
 
-// ─── HLR-lite 유틸 ───────────────────────────────────────────
-
-/**
- * 현재 시점에서의 회상확률 계산
- * p = 2^(-t / half_life)
- *
- * @param halfLifeDays  반감기(일)
- * @param elapsedDays   마지막 복습 이후 경과(일)
- */
 export function recallProbability(halfLifeDays: number, elapsedDays: number): number {
   if (halfLifeDays <= 0) return 0;
   return Math.pow(2, -elapsedDays / halfLifeDays);
 }
 
-/**
- * 목표 유지율을 만족하는 다음 복습 간격 계산
- * t_next = -half_life * log2(r*)
- *
- * @param halfLifeDays  현재 반감기(일)
- * @param retentionTarget  목표 회상확률 (0~1)
- */
 export function nextInterval(halfLifeDays: number, retentionTarget: number): number {
   if (halfLifeDays <= 0 || retentionTarget <= 0 || retentionTarget >= 1) return 1;
   return Math.max(1, -halfLifeDays * Math.log2(retentionTarget));
 }
 
-/**
- * 복습 결과에 따른 반감기 업데이트
- */
 export function updateHalfLife(
   currentHalfLife: number,
   correct: boolean,
-  hintLevel = 0
+  hintLevel = 0,
 ): number {
-  const MIN_HALF_LIFE = 0.5; // 최소 0.5일
-  const MAX_HALF_LIFE = 365; // 최대 1년
-
-  let multiplier = correct ? 1.15 : 0.70;
-
-  // 힌트를 많이 사용했으면 증가 폭 제한
+  const minHalfLife = 0.5;
+  const maxHalfLife = 365;
+  let multiplier = correct ? 1.15 : 0.7;
   if (correct && hintLevel >= 2) multiplier = 1.05;
-
-  return Math.min(MAX_HALF_LIFE, Math.max(MIN_HALF_LIFE, currentHalfLife * multiplier));
+  return Math.min(maxHalfLife, Math.max(minHalfLife, currentHalfLife * multiplier));
 }
 
-// ─── 레벨 추정 ───────────────────────────────────────────────
-
-function inferLevel(
-  targetLevel?: string
-): 'beginner' | 'intermediate' | 'advanced' {
+function inferLevel(targetLevel?: string): 'beginner' | 'intermediate' | 'advanced' {
   if (!targetLevel) return 'beginner';
   const level = targetLevel.toUpperCase();
   if (level.includes('N5') || level.includes('N4')) return 'beginner';
   if (level.includes('N3') || level.includes('N2')) return 'intermediate';
   return 'advanced';
+}
+
+async function loadLatestDiagnosisVector(userId: string): Promise<StrategyVector | null> {
+  const { rows } = await pool.query<{ strategy_vector: StrategyVector }>(
+    `
+    SELECT strategy_vector
+    FROM diagnosis_results
+    WHERE user_id = $1
+    ORDER BY completed_at DESC
+    LIMIT 1
+    `,
+    [userId],
+  );
+
+  return rows[0]?.strategy_vector ?? null;
+}
+
+async function getOverdueCount(userId: string): Promise<number> {
+  const { rows } = await pool.query<{ count: string }>(
+    `
+    SELECT COUNT(*)::TEXT AS count
+    FROM card_state
+    WHERE user_id = $1
+      AND state IN ('learning', 'review', 'relearning')
+      AND due_ts < NOW() - INTERVAL '1 day'
+    `,
+    [userId],
+  );
+
+  return Number(rows[0]?.count ?? 0);
+}
+
+export function applyGoalAwareAdjustments(input: {
+  goal: PlanRequest['goal'];
+  constraints: PlanRequest['constraints'];
+  config: PlanConfig;
+  receipt: PlanExplanationReceipt[];
+  retentionTargetRef: (value: number) => void;
+}): void {
+  const { goal, constraints, config, receipt, retentionTargetRef } = input;
+
+  if (goal.target_date) {
+    const daysToTarget = Math.ceil((new Date(goal.target_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    if (daysToTarget > 0 && daysToTarget <= 30) {
+      const previousReviewCount = config.daily_budget.review_count;
+      const previousNewCount = config.daily_budget.new_count;
+      retentionTargetRef(round3(config.retention_target + 0.03));
+      config.daily_budget.review_count = Math.round(config.daily_budget.review_count * 1.2);
+      config.daily_budget.new_count = Math.max(0, Math.round(config.daily_budget.new_count * 0.8));
+      receipt.push({
+        factor: 'target_date',
+        basis: 'goal',
+        evidence: `days_to_target=${daysToTarget}`,
+        effect: 'Retention target +0.03, review budget +20%, new cards -20%.',
+        counterfactual: `Without target_date, review_count would stay ${previousReviewCount} and new_count would stay ${previousNewCount}.`,
+      });
+      config.notes.push('The target date is close, so review load increased and new cards were reduced.');
+    }
+  }
+
+  const focus = new Set(goal.focus ?? []);
+  if (focus.has('READING')) {
+    const previousShare = round3(config.mix.SURFACE_TO_READING);
+    config.mix = shiftMix(config.mix, 'SURFACE_TO_READING', 0.15, 'SURFACE_TO_MEANING');
+    receipt.push({
+      factor: 'focus_reading',
+      basis: 'goal',
+      evidence: 'goal.focus includes READING',
+      effect: 'SURFACE_TO_READING share increased by 15 percentage points.',
+      counterfactual: `Without READING focus, SURFACE_TO_READING would stay ${Math.round(previousShare * 100)}%.`,
+    });
+  }
+
+  if (focus.has('VOCAB') || focus.has('PRODUCTION')) {
+    const previousShare = round3(config.mix.MEANING_TO_SURFACE);
+    config.mix = shiftMix(config.mix, 'MEANING_TO_SURFACE', 0.1, 'MCQ');
+    receipt.push({
+      factor: 'focus_production',
+      basis: 'goal',
+      evidence: `goal.focus=${[...focus].join(',')}`,
+      effect: 'MEANING_TO_SURFACE share increased by 10 percentage points.',
+      counterfactual: `Without VOCAB/PRODUCTION focus, MEANING_TO_SURFACE would stay ${Math.round(previousShare * 100)}%.`,
+    });
+  }
+
+  if (constraints.offline_expected) {
+    const previousChunk = config.ui_policy.session_chunk_min;
+    const previousNewCount = config.daily_budget.new_count;
+    config.ui_policy.session_chunk_min = Math.min(config.ui_policy.session_chunk_min, 10);
+    config.daily_budget.new_count = Math.max(0, Math.round(config.daily_budget.new_count * 0.9));
+    receipt.push({
+      factor: 'offline_expected',
+      basis: 'goal',
+      evidence: 'constraints.offline_expected=true',
+      effect: 'Session chunk capped at 10 minutes and new cards reduced by 10%.',
+      counterfactual: `Without offline_expected, session_chunk_min would stay ${previousChunk} and new_count would stay ${previousNewCount}.`,
+    });
+  }
+}
+
+function pushWeaknessReceipts(
+  vector: StrategyVector,
+  flags: Record<string, boolean>,
+  receipt: PlanExplanationReceipt[],
+): void {
+  if (flags.recall_weak) {
+    receipt.push({
+      factor: 'recall_gap',
+      basis: 'diagnosis',
+      evidence: `recall_gap=${round3(vector.recall_gap)}`,
+      effect: 'Retrieval-heavy prompts stay elevated before recognition share expands again.',
+    });
+  }
+  if (flags.reading_weak) {
+    receipt.push({
+      factor: 'reading_weak',
+      basis: 'diagnosis',
+      evidence: `reading_weak=${round3(vector.reading_weak)}`,
+      effect: 'Reading prompts are emphasized because surface-to-reading remains unstable.',
+    });
+  }
+  if (flags.form_weak) {
+    receipt.push({
+      factor: 'form_weak',
+      basis: 'diagnosis',
+      evidence: `form_weak=${round3(vector.form_weak)}`,
+      effect: 'Production checks stay active to reduce form confusion.',
+    });
+  }
+  if (flags.load_sensitive) {
+    receipt.push({
+      factor: 'load_sensitive',
+      basis: 'diagnosis',
+      evidence: `load_sensitive=${round3(vector.load_sensitive)}`,
+      effect: 'Hint steps remain conservative and session chunks shorten under cognitive load.',
+    });
+  }
+  if (flags.lateness_risk) {
+    receipt.push({
+      factor: 'lateness_fragile',
+      basis: 'behavior',
+      evidence: `lateness_fragile=${round3(vector.lateness_fragile ?? 0)}`,
+      effect: 'New-card pace is reduced because late reviews already correlate with performance drop.',
+    });
+  }
+}
+
+function buildRecoveryPlan(overdueCount: number, baselineMinutes: number): RecoveryPlan | undefined {
+  if (overdueCount <= 0) return undefined;
+
+  if (overdueCount >= 30) {
+    return {
+      active: true,
+      overdue_count: overdueCount,
+      recommended_minutes: Math.max(15, baselineMinutes),
+      mode: 'seven_day',
+      summary: 'Overdue backlog is high, so a 7-day recovery plan is active with reduced new-card pressure.',
+    };
+  }
+
+  if (overdueCount >= 12) {
+    return {
+      active: true,
+      overdue_count: overdueCount,
+      recommended_minutes: Math.max(12, Math.round(baselineMinutes * 0.85)),
+      mode: 'three_day',
+      summary: 'A 3-day recovery plan is active to clear overdue cards without creating a review spike.',
+    };
+  }
+
+  return {
+    active: true,
+    overdue_count: overdueCount,
+    recommended_minutes: 15,
+    mode: 'focus_15',
+    summary: 'A short 15-minute recovery session is recommended to prevent the backlog from compounding.',
+  };
+}
+
+function blendVectors(
+  diagnosisVector: StrategyVector,
+  behaviorVector: StrategyVector,
+  diagnosisWeight: number,
+): StrategyVector {
+  const behaviorWeight = 1 - diagnosisWeight;
+
+  return {
+    recall_gap: round3(diagnosisVector.recall_gap * diagnosisWeight + behaviorVector.recall_gap * behaviorWeight),
+    reading_weak: round3(diagnosisVector.reading_weak * diagnosisWeight + behaviorVector.reading_weak * behaviorWeight),
+    form_weak: round3(diagnosisVector.form_weak * diagnosisWeight + behaviorVector.form_weak * behaviorWeight),
+    load_sensitive: round3(diagnosisVector.load_sensitive * diagnosisWeight + behaviorVector.load_sensitive * behaviorWeight),
+    lateness_fragile: round3(behaviorVector.lateness_fragile ?? 0),
+  };
+}
+
+function shiftMix(
+  mix: PlanMixRecord,
+  increaseKey: keyof PlanMixRecord,
+  delta: number,
+  decreaseKey: keyof PlanMixRecord,
+): PlanMixRecord {
+  const next = { ...mix };
+  const usableDelta = Math.min(delta, next[decreaseKey]);
+  next[increaseKey] = next[increaseKey] + usableDelta;
+  next[decreaseKey] = Math.max(0, next[decreaseKey] - usableDelta);
+  return normalizeMix(next);
+}
+
+function normalizeMix(mix: PlanMixRecord): PlanMixRecord {
+  const total = Object.values(mix).reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return mix;
+
+  const normalized = { ...mix };
+  (Object.keys(normalized) as Array<keyof PlanMixRecord>).forEach((key) => {
+    normalized[key] = round3(normalized[key] / total);
+  });
+
+  return normalized;
+}
+
+function round3(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }

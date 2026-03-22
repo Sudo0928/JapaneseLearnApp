@@ -1,44 +1,50 @@
-/**
- * GET  /v1/report/weekly  — 주간 리포트
- * POST /v1/report/batch   — 일배치 수동 트리거 (관리자용)
- */
-
 import { Router, Request, Response } from 'express';
 import { requireAdminKey, requireAuth } from '../middleware/auth';
 import { generateWeeklyReport, runDailyAggBatch, upsertDailyAgg } from '../services/report-service';
+import { getShadowStatusOverview, refreshShadowModelsForActiveUsers } from '../services/shadow-model-service';
 
 const router = Router();
 
-/**
- * GET /v1/report/weekly
- * 현재 사용자의 최근 7일 주간 리포트 반환
- */
 router.get('/weekly', requireAuth, async (req: Request, res: Response): Promise<void> => {
   const userId = req.userId!;
 
   try {
-    // 오늘 집계가 없으면 즉시 갱신
     await upsertDailyAgg(userId, new Date());
-
     const report = await generateWeeklyReport(userId);
     res.json(report);
   } catch (err) {
-    console.error('[report/weekly] 오류:', err);
-    res.status(500).json({ error: '리포트 생성 중 오류가 발생했습니다.' });
+    console.error('[report/weekly] error:', err);
+    res.status(500).json({ error: 'Failed to generate weekly report.' });
   }
 });
 
-/**
- * POST /v1/report/batch
- * 일배치 수동 트리거 (개발/관리자용, 프로덕션에서는 크론으로 실행)
- */
 router.post('/batch', requireAdminKey, async (_req: Request, res: Response): Promise<void> => {
   try {
-    const result = await runDailyAggBatch();
-    res.json({ message: '일배치 완료', ...result });
+    const [aggResult, shadowCount] = await Promise.all([
+      runDailyAggBatch(),
+      refreshShadowModelsForActiveUsers(),
+    ]);
+
+    res.json({
+      message: 'Batch completed.',
+      processed_users: aggResult.processed,
+      generated_reports: aggResult.processed,
+      failed_users: 0,
+      shadow_models_refreshed: shadowCount,
+    });
   } catch (err) {
-    console.error('[report/batch] 오류:', err);
-    res.status(500).json({ error: '배치 처리 중 오류가 발생했습니다.' });
+    console.error('[report/batch] error:', err);
+    res.status(500).json({ error: 'Failed to run report batch.' });
+  }
+});
+
+router.get('/shadow-status', requireAdminKey, async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const result = await getShadowStatusOverview();
+    res.json(result);
+  } catch (err) {
+    console.error('[report/shadow-status] error:', err);
+    res.status(500).json({ error: 'Failed to load shadow status.' });
   }
 });
 

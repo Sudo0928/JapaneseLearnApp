@@ -10,6 +10,8 @@ import { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 import { scheduleNext, createInitialCardState, CardState } from './sm2-scheduler';
 import { ReviewEvent } from '@japanese-learn/shared';
+import { recallProbability, updateHalfLife } from './plan-generator';
+import { refreshShadowModel } from './shadow-model-service';
 
 type Queryable = {
   query: PoolClient['query'];
@@ -166,6 +168,15 @@ export async function applyReviewResultWithStatus(
     );
 
     const current = rows[0] ?? null;
+    const reviewTs = new Date(event.ts);
+    const previousHalfLife = current?.stability && current.stability > 0
+      ? current.stability
+      : Math.max(1, current?.interval_days ?? 1);
+    const elapsedDays = current?.last_reviewed_at
+      ? Math.max(0, (reviewTs.getTime() - new Date(current.last_reviewed_at).getTime()) / (1000 * 60 * 60 * 24))
+      : Math.max(1, current?.interval_days ?? 1);
+    const shadowPredRecall = recallProbability(previousHalfLife, elapsedDays);
+    const nextHalfLife = updateHalfLife(previousHalfLife, event.correct, event.hint_level ?? 0);
 
     const snapshot = buildReviewSnapshot(current);
 
@@ -189,13 +200,17 @@ export async function applyReviewResultWithStatus(
         event_id, user_id, card_id, item_id, ts,
         prompt_type, correct, rt_ms, attempt_count, hint_level,
         confidence, error_type, device, offline, schema_version,
+        shadow_half_life_at_review, shadow_pred_recall, shadow_model_ver,
+        client_network_state, client_last_successful_sync_at, client_queue_depth,
         due_ts_at_review, interval_days_at_review, ease_factor_at_review,
         repetitions_at_review, state_at_review, is_new_at_review
       ) VALUES (
         $1, $2, $3, $4, $5::TIMESTAMPTZ,
         $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15,
-        $16, $17, $18, $19, $20, $21
+        $16, $17, $18,
+        $19, $20::TIMESTAMPTZ, $21,
+        $22, $23, $24, $25, $26, $27
       )
       ON CONFLICT (event_id) DO NOTHING
       RETURNING event_id
@@ -216,6 +231,12 @@ export async function applyReviewResultWithStatus(
         event.device ?? 'UNKNOWN',
         event.offline ?? false,
         event.schema_version ?? '1.0.0',
+        nextHalfLife,
+        shadowPredRecall,
+        'hlr_shadow_v1',
+        event.network_state ?? null,
+        event.last_successful_sync_at ?? null,
+        event.queue_depth ?? null,
         snapshot.due_ts_at_review,
         snapshot.interval_days_at_review,
         snapshot.ease_factor_at_review,
@@ -265,12 +286,13 @@ export async function applyReviewResultWithStatus(
         schedule.interval_days,
         schedule.ease_factor,
         schedule.repetitions,
-        current?.stability ?? 0,
+        nextHalfLife,
         schedule.state,
-        new Date(event.ts),
+        reviewTs,
       ]
     );
 
+    await refreshShadowModel(event.user_id, client);
     await client.query('COMMIT');
     return { state: updatedRows[0], inserted: true };
   } catch (err) {

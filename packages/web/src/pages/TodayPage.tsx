@@ -1,30 +1,33 @@
 import { useEffect, useState } from 'react';
-import { fetchTodayCards, TodayCard } from '../services/api';
+import type { PlanResponse, TodayCard } from '@japanese-learn/shared';
+import { getPromptTypeLabel, getStudyMetadataTagLabel } from '@japanese-learn/shared';
+import { fetchTodayCards } from '../services/api';
+import { useSettings } from '../context/settings';
+import {
+  translatePlanBasis,
+  translatePlanCounterfactual,
+  translatePlanEvidence,
+  translatePlanFactor,
+  translatePlanNarrative,
+} from '../i18n/plan-copy';
 import styles from '../styles';
 
-const PROMPT_LABEL: Record<string, string> = {
-  SURFACE_TO_MEANING: '표기→뜻',
-  MEANING_TO_SURFACE: '뜻→표기',
-  SURFACE_TO_READING: '표기→읽기',
-  MCQ: '선택형',
-  CLOZE: '문맥',
-  LISTENING: '듣기',
-};
-
-function getMetadataTags(card: TodayCard): string[] {
+function getMetadataTags(card: TodayCard, locale: Parameters<typeof getPromptTypeLabel>[0]): string[] {
   const tags: string[] = [];
-
-  if (card.example_sentence_ja) tags.push('예문');
-  if (card.audio_ref) tags.push('오디오');
-  if (card.prompt_payload && Object.keys(card.prompt_payload).length > 0) tags.push('미래문항');
-
+  if (card.example_sentence_ja) tags.push(getStudyMetadataTagLabel(locale, 'example'));
+  if (card.audio_ref) tags.push(getStudyMetadataTagLabel(locale, 'audio'));
+  if (card.prompt_payload && Object.keys(card.prompt_payload).length > 0) {
+    tags.push(getStudyMetadataTagLabel(locale, 'payload'));
+  }
   return tags;
 }
 
 export default function TodayPage() {
+  const { t, preferences } = useSettings();
   const [reviewCards, setReviewCards] = useState<TodayCard[]>([]);
   const [newCards, setNewCards] = useState<TodayCard[]>([]);
   const [drills, setDrills] = useState<TodayCard[]>([]);
+  const [plan, setPlan] = useState<PlanResponse | null>(null);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -35,79 +38,96 @@ export default function TodayPage() {
         setReviewCards(data.reviewCards);
         setNewCards(data.newCards);
         setDrills(data.confusionDrills ?? []);
+        setPlan(data.plan);
         setTotal(data.totalCount);
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((fetchError: Error) => setError(fetchError.message))
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div style={styles.center}>불러오는 중...</div>;
-  if (error)   return <div style={styles.errorBox}>{error}</div>;
+  if (loading) return <div style={styles.center}>{t('common.loading')}</div>;
+  if (error) return <div style={styles.errorBox}>{error}</div>;
 
-  const allCards = [...reviewCards, ...newCards];
+  const cards = [...reviewCards, ...newCards];
+  const locale = preferences.locale;
 
   return (
     <div style={styles.page}>
-      <h2 style={styles.heading}>오늘 할 일 <span style={styles.badge}>{total}건</span></h2>
+      <h2 style={styles.heading}>
+        {t('web.today.title')}
+        <span style={styles.badge}>{total}</span>
+      </h2>
 
-      {allCards.length === 0 ? (
+      {cards.length === 0 ? (
         <div style={styles.emptyBox}>
-          <span style={{ fontSize: 40 }}>🎉</span>
-          <p>오늘 복습이 모두 완료됐습니다!</p>
+          <p>{t('web.today.empty')}</p>
         </div>
       ) : (
         <div style={styles.cardGrid}>
-          {allCards.map((c) => {
-            const metadataTags = getMetadataTags(c);
-
+          {cards.map((card) => {
+            const tags = getMetadataTags(card, locale);
             return (
-              <div key={c.card_id} style={styles.card}>
-                <div style={styles.cardSurface}>{c.surface}</div>
-                <div style={styles.cardReading}>{c.reading}</div>
-                <div style={styles.cardMeaning}>{c.meaning_ko}</div>
-                <div style={styles.cardTag}>{PROMPT_LABEL[c.prompt_type] ?? c.prompt_type}</div>
-                {metadataTags.length > 0 && (
+              <div key={card.card_id} style={styles.card}>
+                <div style={styles.cardSurface}>{card.surface}</div>
+                <div style={styles.cardReading}>{card.reading}</div>
+                <div style={styles.cardMeaning}>{card.meaning_ko}</div>
+                <div style={styles.cardTag}>{getPromptTypeLabel(locale, card.prompt_type)}</div>
+                {tags.length > 0 ? (
                   <div style={styles.metaRow}>
-                    {metadataTags.map((tag) => (
-                      <span key={`${c.card_id}-${tag}`} style={styles.metaTag}>{tag}</span>
+                    {tags.map((tag) => (
+                      <span key={`${card.card_id}-${tag}`} style={styles.metaTag}>{tag}</span>
                     ))}
                   </div>
-                )}
-                <div style={{ fontSize: 11, color: '#888' }}>{c.state === 'new' ? '신규' : '복습'}</div>
+                ) : null}
               </div>
             );
           })}
         </div>
       )}
 
-      {drills.length > 0 && (
+      {drills.length > 0 ? (
         <>
           <h3 style={{ ...styles.heading, fontSize: 16, marginTop: 24 }}>
-            혼동쌍 드릴 <span style={styles.badge}>{drills.length}건</span>
+            {t('web.today.drills')}
+            <span style={styles.badge}>{drills.length}</span>
           </h3>
           <div style={styles.cardGrid}>
-            {drills.map((c) => {
-              const metadataTags = getMetadataTags(c);
-
-              return (
-                <div key={`drill-${c.card_id}`} style={{ ...styles.card, borderLeft: '3px solid #F59E0B' }}>
-                  <div style={styles.cardSurface}>{c.surface}</div>
-                  <div style={styles.cardReading}>{c.reading}</div>
-                  <div style={styles.cardMeaning}>{c.meaning_ko}</div>
-                  <div style={{ ...styles.cardTag, color: '#F59E0B' }}>드릴</div>
-                  {metadataTags.length > 0 && (
-                    <div style={styles.metaRow}>
-                      {metadataTags.map((tag) => (
-                        <span key={`drill-${c.card_id}-${tag}`} style={styles.metaTag}>{tag}</span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {drills.map((card) => (
+              <div
+                key={`drill-${card.card_id}`}
+                style={{ ...styles.card, borderLeft: '3px solid var(--app-primary)' }}
+              >
+                <div style={styles.cardSurface}>{card.surface}</div>
+                <div style={styles.cardReading}>{card.reading}</div>
+                <div style={styles.cardMeaning}>{card.meaning_ko}</div>
+              </div>
+            ))}
           </div>
         </>
-      )}
+      ) : null}
+
+      {plan?.explanation_receipt?.length ? (
+        <div style={styles.adminPanel}>
+          <h3 style={styles.sectionTitle}>{t('web.today.plan')}</h3>
+          <div style={styles.activityList}>
+            {plan.explanation_receipt.map((receipt, index) => (
+              <div key={`${receipt.factor}-${index}`} style={styles.activityItem}>
+                <div style={styles.activityMeta}>
+                  <span style={styles.activityAction}>{translatePlanFactor(locale, receipt.factor)}</span>
+                  <span>{translatePlanBasis(locale, receipt.basis)}</span>
+                </div>
+                <div style={styles.activityMessage}>{translatePlanEvidence(locale, receipt.evidence)}</div>
+                <div style={styles.activityMessage}>{translatePlanNarrative(locale, receipt.effect)}</div>
+                {receipt.counterfactual ? (
+                  <div style={{ ...styles.subtext, margin: '6px 0 0' }}>
+                    {translatePlanCounterfactual(locale, receipt.counterfactual)}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

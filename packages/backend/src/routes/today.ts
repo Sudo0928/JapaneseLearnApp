@@ -17,6 +17,7 @@ import { getConfusionDrillCards } from '../services/confusion-drill-service';
 import { ReviewEvent } from '@japanese-learn/shared';
 import { generatePlan } from '../services/plan-generator';
 import { selectCardsByMix } from '../services/queue-compiler';
+import { pool } from '../db/pool';
 
 const router = Router();
 
@@ -40,15 +41,26 @@ router.get('/', requireAuth, async (req: Request, res: Response): Promise<void> 
 
   try {
     await ensureAllCardStatesForUser(userId);
+    const { rows: userRows } = await pool.query<{ onboarding_profile: Record<string, unknown> | null }>(
+      `SELECT onboarding_profile FROM users WHERE user_id = $1`,
+      [userId],
+    );
+    const onboarding = userRows[0]?.onboarding_profile ?? {};
+    const onboardingDailyMinutes = typeof onboarding.daily_minutes === 'number' ? onboarding.daily_minutes : dailyMinutes;
+    const goal = {
+      target_level: typeof onboarding.target_level === 'string' ? onboarding.target_level : undefined,
+      target_date: typeof onboarding.target_date === 'string' ? onboarding.target_date : undefined,
+      focus: Array.isArray(onboarding.focus) ? onboarding.focus.filter((value): value is string => typeof value === 'string') : [],
+    };
 
     const plan = await generatePlan({
       user_id: userId,
       date: new Date().toISOString().slice(0, 10),
-      goal: {},
+      goal,
       constraints: {
-        daily_minutes: dailyMinutes,
+        daily_minutes: onboardingDailyMinutes,
         max_new: maxNew,
-        offline_expected: false,
+        offline_expected: Boolean(onboarding.offline_expected),
       },
     });
 

@@ -4,6 +4,7 @@
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "baseUrl": ".",
     "jsx": "react-jsx",
     "noEmit": true,
     "strict": true,
@@ -12,7 +13,7 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
     "paths": {
-      "@japanese-learn/shared": ["../shared/dist"]
+      "@japanese-learn/shared": ["../shared/src"]
     }
   },
   "include": ["src"]

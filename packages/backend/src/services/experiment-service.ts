@@ -20,6 +20,10 @@ import { createHash } from 'crypto';
 export interface ExperimentVariant {
   exp_id: string;
   variant: 'control' | 'treatment' | 'aa_control' | 'aa_treatment' | 'not_in_experiment';
+  assigned_at?: string;
+  purpose?: string;
+  opt_out_supported?: boolean;
+  exposure_count?: number;
 }
 
 export interface AssignmentsResponse {
@@ -71,8 +75,10 @@ export async function getUserAssignments(userId: string): Promise<AssignmentsRes
     exp_id: string;
     traffic_pct: number;
     is_aa_test: boolean;
+    purpose: string | null;
+    opt_out_supported: boolean | null;
   }>(
-    `SELECT exp_id, traffic_pct, is_aa_test
+    `SELECT exp_id, traffic_pct, is_aa_test, purpose, opt_out_supported
      FROM experiment_definitions
      WHERE status = 'running'`
   );
@@ -81,8 +87,12 @@ export async function getUserAssignments(userId: string): Promise<AssignmentsRes
 
   for (const def of defs) {
     // 기존 배정 확인
-    const { rows: existing } = await pool.query<{ variant: string }>(
-      `SELECT variant FROM experiments WHERE user_id = $1 AND exp_id = $2`,
+    const { rows: existing } = await pool.query<{
+      variant: string;
+      assigned_at: Date;
+      exposure_count: number;
+    }>(
+      `SELECT variant, assigned_at, exposure_count FROM experiments WHERE user_id = $1 AND exp_id = $2`,
       [userId, def.exp_id]
     );
 
@@ -109,7 +119,14 @@ export async function getUserAssignments(userId: string): Promise<AssignmentsRes
       );
     }
 
-    assignments.push({ exp_id: def.exp_id, variant });
+    assignments.push({
+      exp_id: def.exp_id,
+      variant,
+      assigned_at: existing[0]?.assigned_at?.toISOString(),
+      purpose: def.purpose ?? undefined,
+      opt_out_supported: def.opt_out_supported ?? true,
+      exposure_count: existing[0]?.exposure_count ?? 1,
+    });
   }
 
   return { assignments, computed_at: new Date().toISOString() };

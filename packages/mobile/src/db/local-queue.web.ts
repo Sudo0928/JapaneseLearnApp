@@ -74,3 +74,7 @@ export async function getQueueStats(): Promise<{
     failed: rows.filter((row) => row.synced_at === null && row.retry_count >= MAX_RETRY).length,
   };
 }
+
+export async function clearQueue(): Promise<void> {
+  webQueue.clear();
+}

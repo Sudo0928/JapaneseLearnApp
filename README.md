@@ -133,6 +133,7 @@ npm run check:generated
 - `docs/oauth-setup.md`: OAuth / PKCE 설정 가이드
 - `docs/backup-runbook.md`: 백업 및 복구 절차
 - `docs/accessibility-checklist.md`: 접근성 점검 내용
+- `docs/release-gate-checklist.md`: 마이그레이션 + 자동 게이트 + 수동 E2E 체크리스트
 
 ## 라이선스
 

@@ -1,300 +1,307 @@
-/**
- * 주간 리포트 화면 (Sprint 5-1)
- *
- * 설계 원칙:
- * - 리포트는 "학습량"이 아닌 "지연 인출/혼동쌍 감소/연체 회복" 중심
- * - OEC = 즉시 정답률 ❌ → 지연 인출률 ✅
- * - 3~5문장 설명 가능한 인사이트 표시
- */
-
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View,
-  Text,
+  ActivityIndicator,
+  RefreshControl,
+  SafeAreaView,
   ScrollView,
   StyleSheet,
-  SafeAreaView,
-  ActivityIndicator,
+  Text,
   TouchableOpacity,
-  RefreshControl,
+  View,
 } from 'react-native';
-import { getValidAppToken } from '../services/secure-storage';
 import type { WeeklyReport } from '@japanese-learn/shared';
+import {
+  buildLocalizedReportInsights,
+  formatReportPeriod,
+  translateRecoveryMetricLabel,
+  translateReportErrorType,
+} from '@japanese-learn/shared';
+import { getValidAppToken } from '../services/secure-storage';
+import { useSettings } from '../providers/settings-provider';
+import type { ThemeColors } from '../theme';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
 
 export default function ReportScreen({ userId }: { userId?: string }) {
-  const [report, setReport]     = useState<WeeklyReport | null>(null);
-  const [loading, setLoading]   = useState(true);
+  const { colors, preferences, t } = useSettings();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  const [report, setReport] = useState<WeeklyReport | null>(null);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [errMsg, setErrMsg]     = useState('');
+  const [error, setError] = useState('');
 
-  useEffect(() => { fetchReport(); }, []);
-
-  async function fetchReport() {
-    setErrMsg('');
+  const load = useCallback(async () => {
+    setError('');
     const token = await getValidAppToken();
     if (!token) {
-      setErrMsg('로그인이 필요합니다.');
+      setError(t('report.empty'));
       setLoading(false);
+      setRefreshing(false);
       return;
     }
 
     try {
-      const res = await fetch(`${BACKEND_URL}/v1/report/weekly`, {
+      const response = await fetch(`${BACKEND_URL}/v1/report/weekly`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      if (res.ok) {
-        setReport(await res.json() as WeeklyReport);
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        setError(body.error ?? `HTTP ${response.status}`);
+        setReport(null);
       } else {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        setErrMsg(body.error ?? `서버 오류 ${res.status}`);
+        setReport(await response.json() as WeeklyReport);
       }
     } catch (err) {
-      console.error('[ReportScreen] fetchReport 오류:', err);
-      setErrMsg('네트워크 오류. 백엔드가 실행 중인지 확인하세요.');
+      setError(err instanceof Error ? err.message : String(err));
+      setReport(null);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   if (loading) {
     return (
       <SafeAreaView style={styles.center}>
-        <ActivityIndicator size="large" color="#4A6CF7" />
-        <Text style={styles.loadingText}>리포트 생성 중...</Text>
+        <ActivityIndicator size="large" color={colors.primary} />
+        <Text style={styles.helperText}>{t('report.loading')}</Text>
       </SafeAreaView>
     );
   }
 
-  if (errMsg || !report) {
+  if (!report) {
     return (
       <SafeAreaView style={styles.center}>
-        <Text style={{ fontSize: 48, marginBottom: 16 }}>📊</Text>
-        <Text style={styles.emptyText}>
-          {errMsg || '아직 학습 기록이 없습니다'}
-        </Text>
-        <Text style={styles.emptySubText}>
-          {errMsg
-            ? '백엔드 서버가 실행 중인지 확인하세요.'
-            : '학습 탭에서 첫 복습을 완료하면 리포트가 생성됩니다.'}
-        </Text>
-        <TouchableOpacity
-          onPress={() => { setLoading(true); fetchReport(); }}
-          style={styles.retryBtn}
-        >
-          <Text style={styles.retryBtnText}>🔄 다시 불러오기</Text>
+        <Text style={styles.pageTitle}>{t('report.title')}</Text>
+        <Text style={styles.helperText}>{error || t('report.empty')}</Text>
+        <TouchableOpacity onPress={() => void load()} style={styles.primaryButton}>
+          <Text style={styles.primaryButtonText}>{t('common.retry')}</Text>
         </TouchableOpacity>
-        {userId && (
-          <Text style={{ fontSize: 11, color: '#ccc', marginTop: 8 }}>userId: {userId}</Text>
-        )}
+        {userId ? <Text style={styles.debugText}>user_id: {userId}</Text> : null}
       </SafeAreaView>
     );
   }
 
-  const { summary, retention_metrics, confusion_metrics, recovery_metrics, insights, daily_stats, period } = report;
+  const locale = preferences.locale;
+  const insights = buildLocalizedReportInsights(locale, report);
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView
         contentContainerStyle={styles.scroll}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchReport(); }} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              setRefreshing(true);
+              void load();
+            }}
+          />
         }
       >
-        {/* 헤더 */}
-        <Text style={styles.title}>주간 리포트</Text>
-        <Text style={styles.period}>{period.from} ~ {period.to}</Text>
+        <Text style={styles.pageTitle}>{t('report.title')}</Text>
+        <Text style={styles.periodText}>{formatReportPeriod(locale, report.period.from, report.period.to)}</Text>
 
-        {/* 인사이트 (3~5문장) — 핵심 OEC 표시 */}
-        <View style={styles.insightBox}>
-          <Text style={styles.sectionTitle}>이번 주 분석</Text>
-          {insights.map((txt, i) => (
-            <View key={i} style={styles.insightRow}>
-              <Text style={styles.insightBullet}>💡</Text>
-              <Text style={styles.insightText}>{txt}</Text>
-            </View>
+        <SectionCard colors={colors} title={t('report.analysis')}>
+          {insights.map((insight) => (
+            <Text key={insight} style={styles.listText}>{`\u2022 ${insight}`}</Text>
           ))}
+        </SectionCard>
+
+        <View style={styles.grid}>
+          <MetricCard
+            colors={colors}
+            label={t('report.delayedRecall')}
+            value={`${Math.round(report.retention_metrics.due_7d.recall_rate * 100)}%`}
+          />
+          <MetricCard colors={colors} label={t('report.totalReviews')} value={String(report.summary.total_reviews)} />
+          <MetricCard colors={colors} label={t('report.newCards')} value={String(report.summary.total_new_cards)} />
+          <MetricCard colors={colors} label={t('report.streak')} value={String(report.summary.streak_days)} />
         </View>
 
-        {/* 지연 인출 OEC — 즉시 정답률 대신 강조 */}
-        {retention_metrics.due_7d.eligible_count >= 1 && (
-          <View style={styles.card}>
-            <Text style={styles.sectionTitle}>7일 지연 인출률</Text>
-            <Text style={styles.bigNumber}>
-              {Math.round(retention_metrics.due_7d.recall_rate * 100)}%
-            </Text>
-            <Text style={styles.subText}>
-              대상 {retention_metrics.due_7d.eligible_count}회 중{' '}
-              {retention_metrics.due_7d.correct_count}회 정확 회상
-            </Text>
-          </View>
-        )}
-
-        <View style={styles.statsGrid}>
-          <StatCard label="14일 지연" value={`${Math.round(retention_metrics.due_14d.recall_rate * 100)}`} unit="%" />
-          <StatCard label="30일 지연" value={`${Math.round(retention_metrics.due_30d.recall_rate * 100)}`} unit="%" />
-          <StatCard label="연체 보정" value={`${Math.round(retention_metrics.overdue_adjusted_recall_rate * 100)}`} unit="%" />
-          <StatCard label="회복 완료율" value={`${Math.round(recovery_metrics.recovery_completion_rate * 100)}`} unit="%" />
-        </View>
-
-        {/* 요약 통계 */}
-        <View style={styles.statsGrid}>
-          <StatCard label="총 복습" value={summary.total_reviews.toString()} unit="회" />
-          <StatCard label="신규 카드" value={summary.total_new_cards.toString()} unit="개" />
-          <StatCard label="평균 정답률" value={`${Math.round(summary.avg_correct_rate * 100)}`} unit="%" />
-          <StatCard label="연속 학습" value={summary.streak_days.toString()} unit="일" />
-        </View>
-
-        {/* 연체 경고 */}
-        {summary.overdue_days >= 2 && (
-          <View style={styles.warningBox}>
-            <Text style={styles.warningText}>
-              ⚠️ {summary.overdue_days}일 연체 발생. 회복 플랜으로 부담 없이 분산해 보세요.
-            </Text>
-          </View>
-        )}
-
-        {/* 혼동쌍 top-5 */}
-        {confusion_metrics.top_confusions.length > 0 && (
-          <View style={styles.card}>
-            <Text style={styles.sectionTitle}>자주 틀린 항목</Text>
-            {confusion_metrics.top_confusions.map((c, i) => (
-              <View key={i} style={styles.confusionRow}>
-                <Text style={styles.confusionRank}>{i + 1}</Text>
-                <Text style={styles.confusionSurface}>{c.surface}</Text>
-                <Text style={styles.confusionType}>{c.error_type}</Text>
-                <Text style={styles.confusionCount}>{c.error_count}회</Text>
+        {report.confusion_metrics.top_confusions.length > 0 ? (
+          <SectionCard colors={colors} title={t('report.confusions')}>
+            {report.confusion_metrics.top_confusions.map((item, index) => (
+              <View key={`${item.surface}-${index}`} style={styles.row}>
+                <Text style={styles.rowLabel}>{item.surface}</Text>
+                <Text style={styles.rowValue}>
+                  {translateReportErrorType(locale, item.error_type)} {'\u00B7'} {item.error_count}
+                </Text>
               </View>
             ))}
+          </SectionCard>
+        ) : null}
+
+        <SectionCard colors={colors} title={t('report.recovery')}>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{translateRecoveryMetricLabel(locale, 'overdue_backlog_days')}</Text>
+            <Text style={styles.rowValue}>{report.recovery_metrics.overdue_backlog_days.toFixed(1)}</Text>
           </View>
-        )}
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{translateRecoveryMetricLabel(locale, 'recovery_completion_rate')}</Text>
+            <Text style={styles.rowValue}>{Math.round(report.recovery_metrics.recovery_completion_rate * 100)}%</Text>
+          </View>
+          <View style={styles.row}>
+            <Text style={styles.rowLabel}>{translateRecoveryMetricLabel(locale, 'post_recovery_retention')}</Text>
+            <Text style={styles.rowValue}>
+              {report.recovery_metrics.post_recovery_retention !== null
+                ? `${Math.round(report.recovery_metrics.post_recovery_retention * 100)}%`
+                : '-'}
+            </Text>
+          </View>
+        </SectionCard>
 
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>회복 지표</Text>
-          <Text style={styles.insightText}>
-            평균 연체 백로그: {recovery_metrics.overdue_backlog_days.toFixed(1)}일
-          </Text>
-          <Text style={styles.insightText}>
-            정상화까지 소요: {recovery_metrics.recovery_time_to_normal_days ?? '-'}일
-          </Text>
-          <Text style={styles.insightText}>
-            회복 후 유지율: {recovery_metrics.post_recovery_retention !== null
-              ? `${Math.round(recovery_metrics.post_recovery_retention * 100)}%`
-              : '데이터 부족'}
-          </Text>
-        </View>
-
-        {/* 일별 학습 바 차트 (간단 텍스트 기반) */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>일별 학습량</Text>
-          {daily_stats.map((d) => (
-            <View key={d.day} style={styles.barRow}>
-              <Text style={styles.barDay}>{d.day.slice(5)}</Text>
-              <View style={styles.barBg}>
-                <View
-                  style={[
-                    styles.barFill,
-                    { width: `${Math.min(100, (Number(d.reviews) / 80) * 100)}%` },
-                  ]}
-                />
-              </View>
-              <Text style={styles.barCount}>{d.reviews}</Text>
-            </View>
-          ))}
-        </View>
-
-        <Text style={styles.generated}>생성: {new Date(report.generated_at).toLocaleString('ko-KR')}</Text>
+        <Text style={styles.generatedText}>
+          {new Date(report.generated_at).toLocaleString(preferences.locale)}
+        </Text>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function StatCard({ label, value, unit }: { label: string; value: string; unit: string }) {
+function SectionCard(props: { colors: ThemeColors; title: string; children: React.ReactNode }) {
+  const styles = createStyles(props.colors);
   return (
-    <View style={styles.statCard}>
-      <Text style={styles.statValue}>{value}<Text style={styles.statUnit}>{unit}</Text></Text>
-      <Text style={styles.statLabel}>{label}</Text>
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>{props.title}</Text>
+      {props.children}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#FAFAFA' },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  loadingText: { marginTop: 16, color: '#888' },
-  emptyText: { fontSize: 18, fontWeight: '600', color: '#1A1A2E', marginBottom: 8, textAlign: 'center' },
-  emptySubText: { fontSize: 14, color: '#888', textAlign: 'center', lineHeight: 22, marginBottom: 20 },
-  retryBtn: { backgroundColor: '#4A6CF7', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 10 },
-  retryBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
-  scroll: { padding: 24, paddingBottom: 48 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#1A1A2E', marginBottom: 2 },
-  period: { fontSize: 13, color: '#999', marginBottom: 24 },
-  insightBox: {
-    backgroundColor: '#EEF2FF',
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 16,
-    gap: 10,
-  },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A2E', marginBottom: 8 },
-  insightRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
-  insightBullet: { fontSize: 14 },
-  insightText: { flex: 1, fontSize: 13, color: '#374151', lineHeight: 20 },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 14,
-    padding: 18,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  bigNumber: { fontSize: 52, fontWeight: 'bold', color: '#4A6CF7', textAlign: 'center' },
-  subText: { fontSize: 13, color: '#888', textAlign: 'center', marginTop: 4 },
-  statsGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, marginBottom: 16 },
-  statCard: {
-    flex: 1,
-    minWidth: '45%',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 1,
-  },
-  statValue: { fontSize: 28, fontWeight: 'bold', color: '#1A1A2E' },
-  statUnit: { fontSize: 14, color: '#888' },
-  statLabel: { fontSize: 12, color: '#999', marginTop: 4 },
-  warningBox: {
-    backgroundColor: '#FEF9C3',
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 16,
-  },
-  warningText: { fontSize: 13, color: '#854D0E', lineHeight: 20 },
-  confusionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F5F5F5',
-    gap: 12,
-  },
-  confusionRank: { fontSize: 13, color: '#bbb', width: 20, textAlign: 'center' },
-  confusionSurface: { fontSize: 18, fontWeight: '600', color: '#1A1A2E', flex: 1 },
-  confusionType: { fontSize: 11, color: '#F59E0B', backgroundColor: '#FEF3C7', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6 },
-  confusionCount: { fontSize: 13, color: '#EF4444', fontWeight: '600' },
-  barRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8 },
-  barDay: { fontSize: 12, color: '#888', width: 32 },
-  barBg: { flex: 1, height: 8, backgroundColor: '#F3F4F6', borderRadius: 4 },
-  barFill: { height: 8, backgroundColor: '#4A6CF7', borderRadius: 4 },
-  barCount: { fontSize: 12, color: '#888', width: 30, textAlign: 'right' },
-  generated: { fontSize: 11, color: '#ccc', textAlign: 'center', marginTop: 8 },
-});
+function MetricCard(props: { colors: ThemeColors; label: string; value: string }) {
+  const styles = createStyles(props.colors);
+  return (
+    <View style={styles.metricCard}>
+      <Text style={styles.metricValue}>{props.value}</Text>
+      <Text style={styles.metricLabel}>{props.label}</Text>
+    </View>
+  );
+}
+
+function createStyles(colors: ThemeColors) {
+  return StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    center: {
+      flex: 1,
+      backgroundColor: colors.background,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 28,
+      gap: 12,
+    },
+    scroll: {
+      padding: 20,
+      paddingBottom: 40,
+    },
+    pageTitle: {
+      fontSize: 26,
+      fontWeight: '800',
+      color: colors.text,
+      marginBottom: 6,
+    },
+    periodText: {
+      color: colors.textSoft,
+      marginBottom: 18,
+    },
+    helperText: {
+      color: colors.textMuted,
+      textAlign: 'center',
+      lineHeight: 21,
+    },
+    primaryButton: {
+      marginTop: 8,
+      minHeight: 48,
+      minWidth: 180,
+      borderRadius: 14,
+      backgroundColor: colors.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 20,
+    },
+    primaryButtonText: {
+      color: colors.onPrimary,
+      fontWeight: '700',
+    },
+    card: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 18,
+      marginBottom: 14,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    cardTitle: {
+      color: colors.text,
+      fontWeight: '700',
+      marginBottom: 10,
+      fontSize: 15,
+    },
+    listText: {
+      color: colors.textMuted,
+      lineHeight: 20,
+      fontSize: 13,
+      marginBottom: 6,
+    },
+    grid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 12,
+      marginBottom: 6,
+    },
+    metricCard: {
+      width: '47%',
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 18,
+      borderWidth: 1,
+      borderColor: colors.border,
+      marginBottom: 12,
+    },
+    metricValue: {
+      color: colors.primary,
+      fontSize: 24,
+      fontWeight: '800',
+      marginBottom: 4,
+    },
+    metricLabel: {
+      color: colors.textMuted,
+      fontSize: 12,
+    },
+    row: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      gap: 12,
+      marginBottom: 8,
+    },
+    rowLabel: {
+      color: colors.textMuted,
+      fontSize: 13,
+      flex: 1,
+    },
+    rowValue: {
+      color: colors.text,
+      fontWeight: '700',
+      fontSize: 13,
+      textAlign: 'right',
+      maxWidth: '45%',
+    },
+    generatedText: {
+      color: colors.textSoft,
+      fontSize: 11,
+      textAlign: 'center',
+      marginTop: 6,
+    },
+    debugText: {
+      color: colors.textSoft,
+      fontSize: 11,
+    },
+  });
+}

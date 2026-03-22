@@ -1,4 +1,4 @@
-import type { AaValidationResponse, ReportBatchResponse } from '@japanese-learn/shared';
+import type { AaValidationResponse, ReportBatchResponse, ShadowStatusResponse } from '@japanese-learn/shared';
 
 const BASE = '/v1';
 const ADMIN_KEY_STORAGE_KEY = 'admin_api_key_record';
@@ -161,4 +161,8 @@ export async function fetchAaValidation(expId: string): Promise<AaValidationResp
 
 export async function runReportBatch(): Promise<ReportBatchResponse> {
   return adminRequest<ReportBatchResponse>('/report/batch', { method: 'POST' });
+}
+
+export async function fetchShadowStatus(): Promise<ShadowStatusResponse> {
+  return adminRequest<ShadowStatusResponse>('/report/shadow-status');
 }

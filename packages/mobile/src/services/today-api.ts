@@ -5,6 +5,7 @@
  */
 
 import type { ReviewEventInput, TodayCard, TodayResponse } from '@japanese-learn/shared';
+import { fetchWithTimeout } from './network';
 import { getValidAppToken } from './secure-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL ?? 'http://localhost:3000';
@@ -25,7 +26,7 @@ export async function fetchTodayCards(
   maxNew = 6
 ): Promise<TodayResponse> {
   const url = `${BACKEND_URL}/v1/today?maxReview=${maxReview}&maxNew=${maxNew}`;
-  const res = await fetch(url, { headers: await authHeaders() });
+  const res = await fetchWithTimeout(url, { headers: await authHeaders() });
   if (!res.ok) throw new Error(`오늘 할 일 조회 실패: ${res.status}`);
   return res.json();
 }
@@ -35,7 +36,7 @@ export async function submitReview(event: ReviewEventInput): Promise<{
   intervalDays: number;
   state: string;
 }> {
-  const res = await fetch(`${BACKEND_URL}/v1/today/review`, {
+  const res = await fetchWithTimeout(`${BACKEND_URL}/v1/today/review`, {
     method: 'POST',
     headers: await authHeaders(),
     body: JSON.stringify(event),

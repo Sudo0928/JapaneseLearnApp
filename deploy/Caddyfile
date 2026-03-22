@@ -1,0 +1,21 @@
+www.snow-drop.kr {
+  redir https://snow-drop.kr{uri}
+}
+
+snow-drop.kr {
+  encode zstd gzip
+
+  handle /v1/* {
+    reverse_proxy 127.0.0.1:3000
+  }
+
+  handle /health {
+    reverse_proxy 127.0.0.1:3000
+  }
+
+  handle {
+    root * C:/Users/Sudo/Documents/Github/JapaneseLearnApp/packages/web/dist
+    try_files {path} /index.html
+    file_server
+  }
+}

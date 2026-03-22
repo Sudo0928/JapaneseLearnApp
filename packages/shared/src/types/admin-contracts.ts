@@ -16,4 +16,25 @@ export interface ReportBatchResponse {
   processed_users?: number;
   generated_reports?: number;
   failed_users?: number;
+  shadow_models_refreshed?: number;
+}
+
+export interface ShadowStatusEntry {
+  scope: 'user' | 'cohort';
+  subject_id: string;
+  eligibility_state: 'ready' | 'hold' | 'insufficient_data';
+  last_shadow_eval_at: string | null;
+  calibration_score: {
+    log_loss: number;
+    baseline_log_loss: number;
+    brier_score: number;
+    rmse: number;
+  };
+  failure_reason: string | null;
+}
+
+export interface ShadowStatusResponse {
+  generated_at: string;
+  cohort: ShadowStatusEntry | null;
+  users: ShadowStatusEntry[];
 }

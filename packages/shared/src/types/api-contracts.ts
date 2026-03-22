@@ -1,15 +1,7 @@
-/**
- * 백엔드 API 응답 계약 타입 (P1-1: 단일 소스)
- *
- * 이 파일을 web/mobile/backend에서 공통으로 import하여
- * 필드명·구조 불일치를 컴파일 타임에 차단한다.
- */
-
-// ─── 인증 ────────────────────────────────────────────────────
-
 export interface AuthGoogleRequest {
-  idToken: string;   // ← backend expects 'idToken' (not 'id_token')
+  idToken: string;
   device?: string;
+  locale?: SupportedLocale;
 }
 
 export interface ConsentFlags {
@@ -28,15 +20,61 @@ export interface AuthGoogleResponse {
   readyForStudy: boolean;
 }
 
+export type SupportedLocale = 'ko' | 'en' | 'ja';
+export type ThemePreference = 'system' | 'light' | 'dark';
+export type WeeklyVariability = 'low' | 'medium' | 'high';
+export type KanjiBackground = 'none' | 'basic' | 'native';
+
+export interface UserPreferences {
+  locale: SupportedLocale;
+  theme: ThemePreference;
+}
+
+export interface OnboardingProfile {
+  target_level?: string;
+  target_date?: string | null;
+  focus?: string[];
+  daily_minutes: number;
+  weekly_variability: WeeklyVariability;
+  offline_expected: boolean;
+  kanji_background: KanjiBackground;
+  notifications_opt_in: boolean;
+  weak_areas?: string[];
+}
+
+export interface PrivacySummary {
+  raw_event_retention_days: number;
+  agg_retention_days: number;
+  export_supported: boolean;
+  dsr_delete_supported: boolean;
+  research_opt_in_default: boolean;
+}
+
 export interface MeResponse {
   user_id: string;
   tz: string | null;
   locale: string | null;
   consent_flags: ConsentFlags;
   created_at: string;
+  onboarding_profile: OnboardingProfile | null;
+  privacy_summary: PrivacySummary;
+  preferences: UserPreferences;
 }
 
-// ─── 오늘 할 일 ──────────────────────────────────────────────
+export interface UpdatePreferencesRequest {
+  locale?: SupportedLocale;
+  theme?: ThemePreference;
+}
+
+export interface DeleteMeRequest {
+  confirm_phrase: string;
+  export_acknowledged: boolean;
+}
+
+export interface DeleteMeResponse {
+  deleted: true;
+  deleted_at: string;
+}
 
 export interface TodayCard {
   card_id: string;
@@ -55,21 +93,8 @@ export interface TodayCard {
   example_sentence_ko?: string | null;
   audio_ref?: string | null;
   prompt_payload?: Record<string, unknown> | null;
-  isDrill?: boolean;   // true면 혼동쌍 처방 드릴 (P1-3)
+  isDrill?: boolean;
 }
-
-export interface TodayResponse {
-  date: string;
-  userId: string;
-  reviewCards: TodayCard[];
-  newCards: TodayCard[];
-  confusionDrills: TodayCard[];   // P1-3: 혼동쌍 처방 카드
-  totalCount: number;
-  plan: PlanResponse;
-  uiPolicy: PlanUiPolicy;
-}
-
-// ─── 플랜 ────────────────────────────────────────────────────
 
 export interface PlanMix {
   SURFACE_TO_MEANING: number;
@@ -94,6 +119,22 @@ export interface PlanUiPolicy {
   session_chunk_min: number;
 }
 
+export interface PlanExplanationReceipt {
+  factor: string;
+  basis: 'diagnosis' | 'behavior' | 'goal' | 'recovery';
+  evidence: string;
+  effect: string;
+  counterfactual?: string;
+}
+
+export interface RecoveryPlan {
+  active: boolean;
+  overdue_count: number;
+  recommended_minutes: number;
+  mode: 'three_day' | 'seven_day' | 'focus_15';
+  summary: string;
+}
+
 export interface PlanResponse {
   plan_id: string;
   date: string;
@@ -103,10 +144,45 @@ export interface PlanResponse {
   ui_policy: PlanUiPolicy;
   retention_target: number;
   notes: string[];
-  experiment_variant?: string;   // P1-2: 실험 배정 정보
+  experiment_variant?: string;
+  explanation_receipt: PlanExplanationReceipt[];
+  recovery_plan?: RecoveryPlan;
 }
 
-// ─── 진단 ────────────────────────────────────────────────────
+export interface TodayResponse {
+  date: string;
+  userId: string;
+  reviewCards: TodayCard[];
+  newCards: TodayCard[];
+  confusionDrills: TodayCard[];
+  totalCount: number;
+  plan: PlanResponse;
+  uiPolicy: PlanUiPolicy;
+}
+
+export interface DiagnosisMemoryPairs {
+  recall_correct: number;
+  recall_total: number;
+  recognition_correct: number;
+  recognition_total: number;
+  avg_rt_ms: number;
+}
+
+export interface DiagnosisDigitSpan {
+  max_correct_span: number;
+}
+
+export interface DiagnosisVisualDiscrimination {
+  correct: number;
+  total: number;
+  avg_rt_ms: number;
+}
+
+export interface DiagnosisCognitiveMetrics {
+  memory_pairs: DiagnosisMemoryPairs;
+  digit_span: DiagnosisDigitSpan;
+  visual_discrimination: DiagnosisVisualDiscrimination;
+}
 
 export interface DiagnosisSubmitV2Request {
   phase: 'cognitive_v2';
@@ -115,21 +191,80 @@ export interface DiagnosisSubmitV2Request {
     daily_minutes?: number;
     weak_areas?: string[];
   };
-  memory_pairs: {
-    recall_correct: number;
-    recall_total: number;
-    recognition_correct: number;
-    recognition_total: number;
-    avg_rt_ms: number;
-  };
-  digit_span: {
-    max_correct_span: number;
-  };
-  visual_discrimination: {
-    correct: number;
-    total: number;
-    avg_rt_ms: number;
-  };
+  memory_pairs: DiagnosisMemoryPairs;
+  digit_span: DiagnosisDigitSpan;
+  visual_discrimination: DiagnosisVisualDiscrimination;
+}
+
+export type DiagnosisPromptType =
+  | 'SURFACE_TO_MEANING'
+  | 'SURFACE_TO_READING'
+  | 'MEANING_TO_SURFACE'
+  | 'MCQ';
+
+export interface DiagnosisLanguageMicroItem {
+  id: string;
+  item_id: string;
+  prompt_type: DiagnosisPromptType;
+  surface: string;
+  reading: string;
+  meaning_ko: string;
+  choices?: string[];
+}
+
+export interface DiagnosisLanguageMicroAnswer {
+  id: string;
+  prompt_type: DiagnosisPromptType;
+  answer: string;
+  rt_ms: number;
+}
+
+export interface DiagnosisAxisConfidence {
+  recall_gap: number;
+  reading_weak: number;
+  form_weak: number;
+  load_sensitive: number;
+}
+
+export interface DiagnosisSubmitV3Request {
+  phase: 'cognitive_v3';
+  onboarding_profile: OnboardingProfile;
+  cognitive_metrics: DiagnosisCognitiveMetrics;
+  language_micro_answers: DiagnosisLanguageMicroAnswer[];
+}
+
+export interface DiagnosisEvaluateBlockRequest {
+  answered_items: DiagnosisLanguageMicroAnswer[];
+  cognitive_metrics: DiagnosisCognitiveMetrics;
+  onboarding_profile: OnboardingProfile;
+}
+
+export interface DiagnosisEvaluateBlockResponse {
+  done: boolean;
+  next_items: DiagnosisLanguageMicroItem[];
+  reason_codes: string[];
+  confidence_by_axis: DiagnosisAxisConfidence;
+}
+
+export interface DiagnosisSubmitV4Request {
+  phase: 'cognitive_v4';
+  onboarding_profile: OnboardingProfile;
+  cognitive_metrics: DiagnosisCognitiveMetrics;
+  answers: DiagnosisLanguageMicroAnswer[];
+}
+
+export interface DiagnosisEvidence {
+  factor: string;
+  source: 'self_report' | 'cognitive' | 'language_micro' | 'behavior';
+  value: number | string;
+  note: string;
+}
+
+export interface DiagnosisSourceWeights {
+  self_report: number;
+  cognitive: number;
+  language_micro: number;
+  behavior?: number;
 }
 
 export interface DiagnosisResultResponse {
@@ -142,9 +277,21 @@ export interface DiagnosisResultResponse {
   };
   weakness_flags: string[];
   notes: string[];
+  evidence: DiagnosisEvidence[];
+  source_weights: DiagnosisSourceWeights;
+  version: string;
+  question_count?: number;
+  confidence_by_axis?: DiagnosisAxisConfidence;
+  adaptive_reason_codes?: string[];
 }
 
-// ─── 리포트 ──────────────────────────────────────────────────
+export interface DiagnosisBootstrapResponse {
+  core_items: DiagnosisLanguageMicroItem[];
+  adaptive_pool: DiagnosisLanguageMicroItem[];
+  previous_result?: DiagnosisResultResponse;
+  onboarding_defaults: OnboardingProfile;
+  language_micro_items?: DiagnosisLanguageMicroItem[];
+}
 
 export interface DailyStats {
   day: string;
@@ -216,15 +363,43 @@ export interface WeeklyReport {
   generated_at: string;
 }
 
-// ─── 실험 ────────────────────────────────────────────────────
-
 export interface ExperimentAssignment {
   exp_id: string;
   variant: 'control' | 'treatment' | 'aa_control' | 'aa_treatment' | 'not_in_experiment';
   assigned_at?: string;
+  purpose?: string;
+  opt_out_supported?: boolean;
+  exposure_count?: number;
 }
 
 export interface AssignmentsResponse {
   assignments: ExperimentAssignment[];
   computed_at: string;
+}
+
+export interface UserExportResponse {
+  user: {
+    user_id: string;
+    tz: string | null;
+    locale: string | null;
+    created_at: string;
+  };
+  onboarding_profile: OnboardingProfile | null;
+  consent_flags: ConsentFlags;
+  diagnosis_result_latest: DiagnosisResultResponse | null;
+  card_state: unknown[];
+  review_log: unknown[];
+  daily_agg: unknown[];
+  error_agg: unknown[];
+  experiments: ExperimentAssignment[];
+  notification_prefs_redacted: {
+    enabled: boolean;
+    window_start: string | null;
+    window_end: string | null;
+    timezone: string;
+    recovery_plan: boolean;
+    has_push_token: boolean;
+  } | null;
+  exported_at: string;
+  schema_version: string;
 }

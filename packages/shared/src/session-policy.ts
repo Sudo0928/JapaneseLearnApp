@@ -1,4 +1,4 @@
-import type { PlanUiPolicy } from './types/api-contracts';
+import type { PlanUiPolicy, SupportedLocale } from './types/api-contracts';
 
 export const LIVE_SESSION_PROMPT_TYPES = [
   'SURFACE_TO_MEANING',
@@ -109,14 +109,22 @@ export function sessionCardLimit(sessionChunkMin = 20): number {
 export function shouldPauseForChunk(
   nextIndex: number,
   queueLength: number,
-  chunkLimit: number
+  chunkLimit: number,
 ): boolean {
   return Number.isFinite(chunkLimit) && chunkLimit > 0 && nextIndex < queueLength && nextIndex % chunkLimit === 0;
 }
 
 export function getReservedExamplePolicyNote(
-  policy?: Pick<PlanUiPolicy, 'show_example_by_default'>
+  policy?: Pick<PlanUiPolicy, 'show_example_by_default'>,
+  locale: SupportedLocale = 'ko',
 ): string | null {
   if (!policy?.show_example_by_default) return null;
-  return '예문 기본 노출은 콘텐츠 메타데이터 확장 전까지 비활성 상태입니다.';
+
+  if (locale === 'en') {
+    return 'Examples stay visible by default until content metadata expansion is complete.';
+  }
+  if (locale === 'ja') {
+    return '\u30B3\u30F3\u30C6\u30F3\u30C4\u306E\u30E1\u30BF\u30C7\u30FC\u30BF\u62E1\u5F35\u304C\u5B8C\u4E86\u3059\u308B\u307E\u3067\u3001\u4F8B\u6587\u306F\u30C7\u30D5\u30A9\u30EB\u30C8\u3067\u8868\u793A\u3055\u308C\u307E\u3059\u3002';
+  }
+  return '\uCF58\uD150\uCE20 \uBA54\uD0C0\uB370\uC774\uD130 \uD655\uC7A5\uC774 \uC644\uB8CC\uB420 \uB54C\uAE4C\uC9C0 \uC608\uBB38\uC744 \uAE30\uBCF8 \uB178\uCD9C\uB85C \uC720\uC9C0\uD569\uB2C8\uB2E4.';
 }
